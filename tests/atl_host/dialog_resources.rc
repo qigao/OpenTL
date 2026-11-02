@@ -655,6 +655,22 @@ BEGIN
     6903 L"openwtl-help.chm"
 END
 
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+STRINGTABLE
+BEGIN
+    6928 L"OpenWTL localized page"
+    6929 L"English property metadata"
+    6930 L"openwtl-help-en.chm"
+END
+
+LANGUAGE LANG_FRENCH, SUBLANG_FRENCH
+STRINGTABLE
+BEGIN
+    6928 L"Page OpenWTL localisee"
+    6929 L"Metadonnees de propriete"
+    6930 L"openwtl-help-fr.chm"
+END
+
 // Both language variants must be resolved by their actual resource addresses.
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 652 DIALOG 0, 0, 100, 60

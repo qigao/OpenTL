@@ -577,13 +577,30 @@ public:
     AuthoredPageState* state=nullptr;
     IPropertyPage* page=nullptr;
     IPropertyPage* drop=nullptr;
+    IPropertyPage* dropLocale=nullptr;
+    int* localeDestroyed=nullptr;
+    LCID locale=MAKELCID(MAKELANGID(LANG_ENGLISH,SUBLANG_ENGLISH_US),SORT_DEFAULT);
+    HRESULT localeResult=S_OK;
+    int localeQueries=0;
+    bool destroyedInsideLocale=false;
     HRESULT STDMETHODCALLTYPE OnStatusChange(DWORD flags) override {
         ++state->notifications;
         state->valid=flags==PROPPAGESTATUS_DIRTY && page->IsPageDirty()==S_OK && state->valid;
         if (drop) { auto release=drop; drop=nullptr; release->Release(); }
         return E_ACCESSDENIED; // Notification failure does not undo dirty state.
     }
-    HRESULT STDMETHODCALLTYPE GetLocaleID(LCID* locale) override { if (!locale) return E_POINTER; *locale=0x409; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetLocaleID(LCID* output) override {
+        ++localeQueries;
+        if (!output) return E_POINTER;
+        *output=locale;
+        if (dropLocale) {
+            auto release=dropLocale;
+            dropLocale=nullptr;
+            release->Release();
+            destroyedInsideLocale=localeDestroyed && *localeDestroyed!=0;
+        }
+        return localeResult;
+    }
     HRESULT STDMETHODCALLTYPE GetPageContainer(IUnknown** output) override { if (!output) return E_POINTER; *output=nullptr; return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE TranslateAccelerator(MSG*) override { return E_NOTIMPL; }
     BEGIN_COM_MAP(AuthoredPageSite)
@@ -637,7 +654,54 @@ bool authoredPropertyPages() {
     CHECK(again.pszTitle[0]==L'O' && again.pszDocString[0]==L'N' && again.pszHelpFile[0]==L'o');
     ::CoTaskMemFree(info.pszTitle); ::CoTaskMemFree(info.pszDocString); ::CoTaskMemFree(info.pszHelpFile);
     ::CoTaskMemFree(again.pszTitle); ::CoTaskMemFree(again.pszDocString); ::CoTaskMemFree(again.pszHelpFile);
-    authored->m_dwDocString=65535; info={};
+    const int localeQueries=frameSite->localeQueries;
+    authored->m_dwTitle=6928; authored->m_dwDocString=6929; authored->m_dwHelpFile=6930;
+    frameSite->locale=MAKELCID(MAKELANGID(LANG_FRENCH,SUBLANG_FRENCH),SORT_DEFAULT);
+    info={};
+    CHECK(page->GetPageInfo(&info)==S_OK &&
+        !::wcscmp(info.pszTitle,L"Page OpenWTL localisee") &&
+        !::wcscmp(info.pszDocString,L"Metadonnees de propriete") &&
+        !::wcscmp(info.pszHelpFile,L"openwtl-help-fr.chm"));
+    ::CoTaskMemFree(info.pszTitle); ::CoTaskMemFree(info.pszDocString); ::CoTaskMemFree(info.pszHelpFile);
+    frameSite->locale=MAKELCID(MAKELANGID(LANG_ENGLISH,SUBLANG_ENGLISH_US),SORT_DEFAULT);
+    info={};
+    CHECK(page->GetPageInfo(&info)==S_OK &&
+        !::wcscmp(info.pszTitle,L"OpenWTL localized page") &&
+        !::wcscmp(info.pszDocString,L"English property metadata") &&
+        !::wcscmp(info.pszHelpFile,L"openwtl-help-en.chm") &&
+        frameSite->localeQueries==localeQueries+2);
+    ::CoTaskMemFree(info.pszTitle); ::CoTaskMemFree(info.pszDocString); ::CoTaskMemFree(info.pszHelpFile);
+    authored->m_dwTitle=6901; authored->m_dwDocString=6902; authored->m_dwHelpFile=6903;
+    frameSite->locale=MAKELCID(MAKELANGID(LANG_JAPANESE,SUBLANG_DEFAULT),SORT_DEFAULT);
+    info={};
+    CHECK(page->GetPageInfo(&info)==S_OK &&
+        !::wcscmp(info.pszTitle,L"OpenWTL authored page") &&
+        !::wcscmp(info.pszDocString,L"Native property metadata") &&
+        !::wcscmp(info.pszHelpFile,L"openwtl-help.chm"));
+    ::CoTaskMemFree(info.pszTitle); ::CoTaskMemFree(info.pszDocString); ::CoTaskMemFree(info.pszHelpFile);
+    frameSite->locale=MAKELCID(MAKELANGID(LANG_ENGLISH,SUBLANG_ENGLISH_US),SORT_DEFAULT);
+    frameSite->localeResult=E_ACCESSDENIED; info={};
+    CHECK(page->GetPageInfo(&info)==E_ACCESSDENIED && !info.cb && !info.pszTitle);
+    frameSite->localeResult=S_FALSE; info={};
+    CHECK(page->GetPageInfo(&info)==E_UNEXPECTED && !info.cb && !info.pszTitle);
+    frameSite->localeResult=S_OK;
+    AuthoredPageState localeState;
+    ATL::CComObject<AuthoredPage>* localized=nullptr;
+    CHECK(ATL::CComObject<AuthoredPage>::CreateInstance(&localized)==S_OK);
+    localized->state=&localeState; localized->m_size={180,90};
+    localized->m_dwTitle=6928; localized->m_dwDocString=6929; localized->m_dwHelpFile=6930;
+    localized->AddRef();
+    CHECK(localized->SetPageSite(site)==S_OK);
+    frameSite->dropLocale=static_cast<IPropertyPage*>(localized);
+    frameSite->localeDestroyed=&localeState.destroyed;
+    info={};
+    CHECK(frameSite->dropLocale->GetPageInfo(&info)==S_OK && !frameSite->dropLocale &&
+        localeState.destroyed==1 && !frameSite->destroyedInsideLocale &&
+        !::wcscmp(info.pszTitle,L"OpenWTL localized page"));
+    ::CoTaskMemFree(info.pszTitle); ::CoTaskMemFree(info.pszDocString); ::CoTaskMemFree(info.pszHelpFile);
+    frameSite->localeDestroyed=nullptr;
+    authored->m_dwTitle=6901; authored->m_dwDocString=65535; authored->m_dwHelpFile=6903;
+    info={};
     CHECK(page->GetPageInfo(&info)==HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND) &&
         !info.pszTitle && !info.pszDocString && !info.pszHelpFile && !info.cb);
     authored->m_dwDocString=0; authored->m_dwHelpFile=65535; info={};
