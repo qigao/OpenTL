@@ -1155,11 +1155,12 @@ class OriginalWtlAxPage : public WTL::CAxPropertyPageImpl<OriginalWtlAxPage> {
 public:
     enum { IDD = 665 };
     int initialized = 0, destroyed = 0, createCalls = 0;
+    bool expectedCreateFailure = false;
     HRESULT createResult = E_UNEXPECTED;
     HRESULT CreateActiveXControls(UINT id) override {
         ++createCalls;
         createResult = WTL::CAxPropertyPageImpl<OriginalWtlAxPage>::CreateActiveXControls(id);
-        if (FAILED(createResult)) {
+        if (FAILED(createResult) && !expectedCreateFailure) {
             const DWORD error = ::GetLastError();
             const HWND child = ::GetDlgItem(m_hWnd, 711);
             WCHAR windowClass[32]{};
@@ -1280,6 +1281,73 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID re
             state.destroyed == 1 && module.GetLockCount() == 0);
     return true;
 }
+// A failing native IPersistStreamInit::Load must not reach application
+// WM_INITDIALOG or leave a live COM object/module lock behind. Use the same
+// registered factory and original WTL code path as the successful page.
+bool originalWtlAxPageFailedInit(ControlState& state, ATL::CAtlModule& module,
+                                 REFCLSID registeredId) {
+    state = ControlState{};
+    state.classId = registeredId;
+    state.discoverWindow = true;
+    state.siteFirst = true;
+    state.failInit = true;
+    state.streamBytes = 8;
+    OriginalWtlAxPage page;
+    page.expectedCreateFailure = true;
+    WTL::CPropertySheet sheet(L"WTL ActiveX failed initialization");
+    const HPROPSHEETPAGE handle = page.Create();
+    REQUIRE(handle && sheet.AddPage(handle));
+    const HWND window = sheet.Create(nullptr);
+    REQUIRE(window && ::IsWindow(window));
+    // Drive Windows' own page activation; do not synthesize callbacks.
+    REQUIRE(::SendMessageW(window, PSM_SETCURSEL, 0, 0));
+    const HWND current = reinterpret_cast<HWND>(
+        ::SendMessageW(window, PSM_GETCURRENTPAGEHWND, 0, 0));
+    const HWND child = ::GetDlgItem(page.m_hWnd, 711);
+    ATL::CAxWindow hosted(child);
+    ATL::CComPtr<IOleObject> object;
+    const HRESULT query = child ? hosted.QueryControl(IID_IOleObject,
+        reinterpret_cast<void**>(&object.p)) : E_FAIL;
+    const HWND pageBeforeDestroy = page.m_hWnd;
+    const bool nativeBound = current && current == pageBeforeDestroy;
+    const bool noControl = object.p == nullptr;
+    const bool queryRejected = FAILED(query);
+    const bool nativeFailure = page.createCalls == 1 &&
+        page.createResult == E_FAIL && page.initialized == 0;
+    // A live Windows page can still own references and module locks after
+    // the control's failed Load. Require rejection/Close immediately, but
+    // require final COM destruction and module unlock only after Windows
+    // has destroyed the property sheet and its native child windows.
+    const bool failedLoadClosed = state.loaded == 1 &&
+        state.activated == 0 && state.closed == 1;
+    const bool rejected = nativeBound && nativeFailure &&
+                          noControl && queryRejected && failedLoadClosed;
+    const BOOL destroyed = ::DestroyWindow(window);
+    const bool retired = destroyed && page.destroyed == 1 &&
+                         !page.m_hWnd && state.destroyed == 1 &&
+                         state.closed == 1 && module.GetLockCount() == 0;
+    if (!rejected || !retired) {
+        std::fprintf(stderr,
+            "WTL_AX_FAILED_INIT_TRACE rejected=%d retired=%d destroyed=%d"
+            " native_page=%p page_before=%p page_after=%p bound=%d"
+            " native_fail=%d no_control=%d query_rejected=%d failed_load_closed=%d"
+            " child=%p control=%p query=%08lx"
+            " create_calls=%d create_hr=%08lx init=%d destroy_callback=%d"
+            " loaded=%d activated=%d closed=%d control_destroyed=%d"
+            " module_lock=%ld last_error=%lu\n",
+            rejected, retired, destroyed, static_cast<void*>(current),
+            static_cast<void*>(pageBeforeDestroy), static_cast<void*>(page.m_hWnd),
+            nativeBound, nativeFailure, noControl, queryRejected, failedLoadClosed,
+            static_cast<void*>(child), static_cast<void*>(object.p),
+            static_cast<unsigned long>(query), page.createCalls,
+            static_cast<unsigned long>(page.createResult), page.initialized,
+            page.destroyed, state.loaded, state.activated, state.closed,
+            state.destroyed, static_cast<long>(module.GetLockCount()),
+            ::GetLastError());
+    }
+    REQUIRE(rejected && retired);
+    return true;
+}
 bool resourceInitialization() {
     ControlState state;
     CLSID classId{};
@@ -1289,6 +1357,7 @@ bool resourceInitialization() {
     REQUIRE(::CoRegisterClassObject(classId, factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &registration.cookie) == S_OK);
     ATL::CAtlModule module;
     REQUIRE(originalWtlAxPage(state, module, classId));
+    REQUIRE(originalWtlAxPageFailedInit(state, module, classId));
     for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619), WORD(620), WORD(621), WORD(622), WORD(631), WORD(632), WORD(633), WORD(648)}) for (int mode = 0; mode < 5; ++mode) {
         state = ControlState{}; state.classId = classId; state.discoverWindow = true;
         state.siteFirst = mode != 1; state.initInterface = mode != 2;
