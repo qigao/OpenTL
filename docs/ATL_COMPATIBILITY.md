@@ -963,10 +963,36 @@ create the resulting ordinary dialogs directly, verify removed/retained child
 IDs, unchanged sibling records and font geometry, and cover empty results,
 truncated templates, malformed CLSIDs and counted license/stream ownership.
 
-This is the bounded splitting foundation, not the legacy _DialogSplitHelper raw
-pointer/GlobalAlloc API. Resource-span discovery, legacy item traversal and
-DLGINIT stream adapters, and original WTL property-page lifecycle qualification
+The legacy resource adapters below build on this bounded splitting foundation.
+DLGINIT stream adapters and original WTL property-page lifecycle qualification
 remain separate work. _ATL_NO_HOSTING remains defined.
+
+With atlhost.h included, _DialogSplitHelper now provides IsDialogEx,
+DlgTemplateItemCount, FindFirstDlgItem, FindNextDlgItem, IsActiveXControl and
+SplitDialogTemplate for original RT_DIALOG resources in the current ATL resource
+module. Resource names and languages are enumerated through Windows, and the
+actual LockResource/SizeofResource span is established before the supplied
+pointer is read. Named resources and non-default language variants are included.
+There is no global pointer/length cache; the application keeps the resource
+module loaded throughout the calls.
+
+Explicit hosting, bounded splitting and traversal share DialogTemplateCursor.
+Traversal validates the entire resource and accepts only exact item boundaries
+with the correct standard/extended format. The final item has no successor;
+FindNextDlgItem returns null with ERROR_SUCCESS. Invalid/interior/foreign pointers
+fail with a Win32 last-error code. Pointer-only legacy traversal does not infer
+heap allocation lengths, including for split copies; dynamic templates use the
+size-bearing cursor/splitter. Original WTL traverses its original resource.
+
+SplitDialogTemplate validates the optional DLGINIT resource envelope with the
+same reader. It returns the original pointer when no controls are removed.
+Otherwise it returns DWORD-aligned GMEM_FIXED memory, compatible with original
+WTL's GlobalHandle/GlobalFree ownership. Ordinary child bytes and input resources
+remain intact. Storage records fail ERROR_NOT_SUPPORTED here: the original WTL
+page's CreateControlLic IStream path cannot express the explicit host's IStorage
+initialization contract. Stream/INITNEW/string envelope validation does not yet
+qualify their later original-page execution. No window is created by these
+helpers, and the complete ActiveX page framework remains gated off.
 
 DLGINIT stream records (message 0x0376) are bounded by the resource size. Each
 record has a WORD control ID, WORD message and DWORD payload length, followed

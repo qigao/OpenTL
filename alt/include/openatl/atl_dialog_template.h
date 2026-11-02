@@ -57,6 +57,73 @@ public:
             text, static_cast<int>(count), TRUE) == CSTR_EQUAL;
     }
 };
+struct DialogTemplateItem {
+    size_t begin = 0, end = 0;
+    DialogTemplateReader::Field windowClass, title;
+    DWORD id = 0, style = 0;
+    WORD extra = 0;
+    bool activeX = false, hosted = false;
+};
+// One syntax reader for explicit hosting, splitting and resource traversal.
+class DialogTemplateCursor {
+public:
+    DialogTemplateReader reader;
+    bool extended = false;
+    WORD count = 0;
+    DWORD style = 0;
+    DialogTemplateCursor(const void* data, size_t size) noexcept : reader(data, size) {}
+    DWORD ReadHeader() noexcept {
+        if (!reader.bytes) return ERROR_INVALID_DATA;
+        WORD version = 0, signature = 0;
+        if (!reader.Read(version) || !reader.Read(signature)) return ERROR_INVALID_DATA;
+        extended = signature == 0xFFFF;
+        if (extended) {
+            if (version != 1 || !reader.Skip(8) || !reader.Read(style)) return ERROR_INVALID_DATA;
+        } else {
+            reader.position = 0;
+            if (!reader.Read(style) || !reader.Skip(4)) return ERROR_INVALID_DATA;
+        }
+        if (!reader.Read(count) || !reader.Skip(8)) return ERROR_INVALID_DATA;
+        if (style & DS_NOFAILCREATE) return ERROR_NOT_SUPPORTED;
+        DialogTemplateReader::Field menu, windowClass, title, font;
+        if (!reader.Array(menu) || !reader.Array(windowClass) || !reader.Array(title, false)) return ERROR_INVALID_DATA;
+        if ((style & DS_SETFONT) && (!reader.Skip(extended ? 6 : 2) || !reader.Array(font, false))) return ERROR_INVALID_DATA;
+        return ERROR_SUCCESS;
+    }
+    DWORD ReadItem(DialogTemplateItem& item) noexcept {
+        item = {};
+        if (!reader.Align()) return ERROR_INVALID_DATA;
+        item.begin = reader.position;
+        if (!reader.Skip(extended ? 24 : 18) || !reader.Array(item.windowClass) ||
+            !reader.Array(item.title) || !reader.Read(item.extra)) return ERROR_INVALID_DATA;
+        // Standard counts include the size word; extended counts exclude it.
+        if (item.extra && ((!extended && item.extra < 2) ||
+            !reader.Skip(extended ? item.extra : item.extra - 2))) return ERROR_INVALID_DATA;
+        item.end = reader.position;
+        WORD first = 0;
+        std::memcpy(&first, reader.bytes + item.windowClass.begin, sizeof(first));
+        item.activeX = !item.windowClass.ordinal && first == L'{';
+        item.hosted = reader.Equals(item.windowClass, L"AtlAxWin140", 11) ||
+            reader.Equals(item.windowClass, L"AtlAxWinLic140", 14);
+        if ((item.activeX || item.hosted) && item.extra) return ERROR_NOT_SUPPORTED;
+        if (extended) std::memcpy(&item.id, reader.bytes + item.begin + 20, sizeof(item.id));
+        else {
+            WORD id = 0;
+            std::memcpy(&id, reader.bytes + item.begin + 16, sizeof(id)); item.id = id;
+        }
+        std::memcpy(&item.style, reader.bytes + item.begin + (extended ? 8 : 0), sizeof(item.style));
+        return ERROR_SUCCESS;
+    }
+    DWORD ValidateActiveXClass(const DialogTemplateItem& item) const noexcept {
+        if (!item.activeX) return ERROR_SUCCESS;
+        WCHAR text[39]{}; CLSID parsed{};
+        if (item.windowClass.end - item.windowClass.begin != sizeof(text)) return ERROR_INVALID_DATA;
+        std::memcpy(text, reader.bytes + item.windowClass.begin, sizeof(text));
+        if (text[37] != L'}' || ::CLSIDFromString(text, &parsed) != S_OK) return ERROR_INVALID_DATA;
+        return item.title.ordinal || item.title.end - item.title.begin != sizeof(WORD) ?
+            ERROR_NOT_SUPPORTED : ERROR_SUCCESS;
+    }
+};
 enum class AxDialogTemplateMode { HostControls, SplitControls };
 inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTemplate& output,
     const void* initData = nullptr, size_t initSize = 0,
@@ -110,52 +177,32 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
         }
         std::vector<bool> matched(initialization.size(), false);
         std::vector<AxDialogInit> orderedInitialization;
-        DialogTemplateReader reader(data, size);
-        WORD version = 0, signature = 0, count = 0;
-        DWORD style = 0;
-        if (!reader.Read(version) || !reader.Read(signature)) return ERROR_INVALID_DATA;
-        const bool extended = signature == 0xFFFF;
-        if (extended) {
-            if (version != 1 || !reader.Skip(8) || !reader.Read(style)) return ERROR_INVALID_DATA;
-        } else {
-            reader.position = 0;
-            if (!reader.Read(style) || !reader.Skip(4)) return ERROR_INVALID_DATA;
-        }
-        if (!reader.Read(count) || !reader.Skip(8)) return ERROR_INVALID_DATA;
-        if (style & DS_NOFAILCREATE) return ERROR_NOT_SUPPORTED;
-        DialogTemplateReader::Field menu, windowClass, title, font;
-        if (!reader.Array(menu) || !reader.Array(windowClass) || !reader.Array(title, false)) return ERROR_INVALID_DATA;
-        if ((style & DS_SETFONT) && (!reader.Skip(extended ? 6 : 2) || !reader.Array(font, false))) return ERROR_INVALID_DATA;
+        DialogTemplateCursor cursor(data, size);
+        DWORD error = cursor.ReadHeader();
+        if (error) return error;
+        auto& reader = cursor.reader;
+        const bool extended = cursor.extended;
+        const WORD count = cursor.count;
         std::vector<BYTE> result(reader.bytes, reader.bytes + reader.position);
         bool converted = false;
         WORD removed = 0;
         for (WORD n = 0; n < count; ++n) {
-            if (!reader.Align()) return ERROR_INVALID_DATA;
-            const size_t start = reader.position;
-            if (!reader.Skip(extended ? 24 : 18)) return ERROR_INVALID_DATA;
-            DialogTemplateReader::Field itemClass, itemTitle;
-            if (!reader.Array(itemClass) || !reader.Array(itemTitle)) return ERROR_INVALID_DATA;
-            WORD extra = 0;
-            if (!reader.Read(extra)) return ERROR_INVALID_DATA;
-            // Standard creation-data sizes include the size word; extended
-            // extraCount is the number of bytes following that word.
-            if (extra && ((!extended && extra < 2) || !reader.Skip(extended ? extra : extra - 2))) return ERROR_INVALID_DATA;
-            WORD first = 0;
-            std::memcpy(&first, reader.bytes + itemClass.begin, sizeof(first));
-            const bool clsidClass = !itemClass.ordinal && first == L'{';
-            const bool axClass = reader.Equals(itemClass, L"AtlAxWin140", 11) || reader.Equals(itemClass, L"AtlAxWinLic140", 14);
-            if ((clsidClass || axClass) && extra) return ERROR_NOT_SUPPORTED;
-            DWORD id = 0;
-            if (extended) std::memcpy(&id, reader.bytes + start + 20, sizeof(id));
-            else { WORD shortId = 0; std::memcpy(&shortId, reader.bytes + start + 16, sizeof(shortId)); id = shortId; }
+            DialogTemplateItem item;
+            error = cursor.ReadItem(item);
+            if (error) return error;
+            const size_t start = item.begin;
+            const auto& itemClass = item.windowClass;
+            const auto& itemTitle = item.title;
+            const bool clsidClass = item.activeX, axClass = item.hosted;
+            const DWORD id = item.id;
             AxDialogInit* record = nullptr;
             for (size_t i = 0; i < initialization.size(); ++i) if (initialization[i].id == id) {
                 if (matched[i]) return ERROR_INVALID_DATA;
                 auto& current = initialization[i];
                 if (current.IsString()) {
-                    WORD atom = 0; DWORD itemStyle = 0;
+                    WORD atom = 0;
+                    const DWORD itemStyle = item.style;
                     if (itemClass.ordinal) std::memcpy(&atom, reader.bytes + itemClass.begin + sizeof(WORD), sizeof(atom));
-                    std::memcpy(&itemStyle, reader.bytes + start + (extended ? 8 : 0), sizeof(itemStyle));
                     if (current.kind == AxDialogInit::Kind::ListString) {
                         if (atom != 0x83 && !reader.Equals(itemClass, L"ListBox", 7)) return ERROR_INVALID_DATA;
                         if ((itemStyle & LBS_NODATA) || ((itemStyle & (LBS_OWNERDRAWFIXED | LBS_OWNERDRAWVARIABLE)) &&
@@ -178,13 +225,8 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
                 result.insert(result.end(), reader.bytes + start, reader.bytes + reader.position);
                 continue;
             }
-            if (clsidClass) {
-                WCHAR clsid[39]{}; CLSID parsed{};
-                if (itemClass.end - itemClass.begin != sizeof(clsid)) return ERROR_INVALID_DATA;
-                std::memcpy(clsid, reader.bytes + itemClass.begin, sizeof(clsid));
-                if (clsid[37] != L'}' || ::CLSIDFromString(clsid, &parsed) != S_OK) return ERROR_INVALID_DATA;
-                if (itemTitle.ordinal || itemTitle.end - itemTitle.begin != sizeof(WORD)) return ERROR_NOT_SUPPORTED;
-            }
+            error = cursor.ValidateActiveXClass(item);
+            if (error) return error;
             if (mode == AxDialogTemplateMode::SplitControls) {
                 // WTL creates raw CLSID-class controls after the native page.
                 // Explicit AtlAxWin controls with persistence need the existing

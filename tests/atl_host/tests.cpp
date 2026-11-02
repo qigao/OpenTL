@@ -817,6 +817,115 @@ size_t DialogBytesFind(const std::vector<BYTE>& bytes, const void* value, size_t
     const auto first = static_cast<const BYTE*>(value);
     return static_cast<size_t>(std::search(bytes.begin(), bytes.end(), first, first + size) - bytes.begin());
 }
+struct GlobalSplitTemplate {
+    HGLOBAL memory = nullptr;
+    ~GlobalSplitTemplate() { if (memory) ::GlobalFree(memory); }
+    bool Free() {
+        if (!memory) return true;
+        if (::GlobalFree(memory)) return false;
+        memory = nullptr; return true;
+    }
+};
+bool splitDialogResources() {
+    namespace Split = ATL::_DialogSplitHelper;
+    const HINSTANCE instance = ATL::_AtlBaseModule.GetResourceInstance();
+    const auto inspect = [&](LPCWSTR name, WORD language, bool extended, WORD axId, WORD labelId)->bool {
+        const HRSRC resource = ::FindResourceExW(instance, MAKEINTRESOURCEW(5), name, language);
+        CHECK(resource);
+        const auto bytes = static_cast<const BYTE*>(::LockResource(::LoadResource(instance, resource)));
+        const DWORD size = ::SizeofResource(instance, resource);
+        CHECK(bytes && size);
+        const auto original = reinterpret_cast<const DLGTEMPLATE*>(bytes);
+        const std::vector<BYTE> snapshot(bytes, bytes + size);
+        const int callbacks = MetricsDialogCallbacks;
+        CHECK(Split::IsDialogEx(original) == extended && ::GetLastError() == ERROR_SUCCESS);
+        CHECK(Split::DlgTemplateItemCount(original) == (axId ? 2 : 1) && ::GetLastError() == ERROR_SUCCESS);
+        DLGITEMTEMPLATE* item = Split::FindFirstDlgItem(original);
+        CHECK(item && ::GetLastError() == ERROR_SUCCESS);
+        CHECK(Split::IsActiveXControl(item, !extended) == FALSE && ::GetLastError() == ERROR_INVALID_DATA);
+        CHECK(!Split::FindNextDlgItem(reinterpret_cast<DLGITEMTEMPLATE*>(reinterpret_cast<BYTE*>(item) + 2), extended) &&
+            ::GetLastError() == ERROR_INVALID_DATA);
+        for (WORD n = 0; n < (axId ? 2 : 1); ++n) {
+            CHECK(item && reinterpret_cast<UINT_PTR>(item) % 4 == 0);
+            DWORD id = 0;
+            if (extended) id = reinterpret_cast<Split::DLGITEMTEMPLATEEX*>(item)->id;
+            else id = item->id;
+            CHECK(id == (axId && !n ? axId : labelId));
+            CHECK(Split::IsActiveXControl(item, extended) == (axId && !n) && ::GetLastError() == ERROR_SUCCESS);
+            item = Split::FindNextDlgItem(item, extended);
+            CHECK(::GetLastError() == ERROR_SUCCESS);
+        }
+        CHECK(!item && MetricsDialogCallbacks == callbacks);
+        CHECK(!Split::FindFirstDlgItem(reinterpret_cast<const DLGTEMPLATE*>(bytes + 2)) &&
+            ::GetLastError() == ERROR_INVALID_DATA);
+        GlobalSplitTemplate owned;
+        const DLGTEMPLATE* split = Split::SplitDialogTemplate(original);
+        if (split && split != original) owned.memory = reinterpret_cast<HGLOBAL>(const_cast<DLGTEMPLATE*>(split));
+        CHECK(split && ::GetLastError() == ERROR_SUCCESS && (split != original) == (axId != 0));
+        ATL::detail::AxDialogTemplate expected;
+        CHECK(ATL::detail::SplitAxDialogTemplate(bytes, size, expected) == ERROR_SUCCESS &&
+            !std::memcmp(split, expected.Get(), expected.size));
+        if (owned.memory) CHECK(::GlobalHandle(split) == owned.memory && ::GlobalSize(owned.memory) >= expected.size);
+        CHECK(MetricsDialogCallbacks == callbacks && !std::memcmp(bytes, snapshot.data(), size));
+        MetricsDialogWindow native;
+        native.window = ::CreateDialogIndirectParamW(instance, split, ::GetDesktopWindow(), MetricsDialogProcedure, 0);
+        CHECK(native.window && (!axId || !::GetDlgItem(native.window, axId)) && ::GetDlgItem(native.window, labelId));
+        CHECK(::DestroyWindow(native.window)); native.window = nullptr;
+        CHECK(owned.Free());
+        // Pointer-only legacy helpers do not infer an allocation length. Heap
+        // copies remain usable through the shared size-bearing syntax cursor.
+        std::vector<DWORD> copied((size + 3) / 4);
+        std::memcpy(copied.data(), bytes, size);
+        CHECK(!Split::FindFirstDlgItem(reinterpret_cast<const DLGTEMPLATE*>(copied.data())) &&
+            ::GetLastError() == ERROR_RESOURCE_DATA_NOT_FOUND);
+        ATL::detail::DialogTemplateCursor cursor(copied.data(), size);
+        CHECK(cursor.ReadHeader() == ERROR_SUCCESS && cursor.extended == extended && cursor.count == (axId ? 2 : 1));
+        return true;
+    };
+    CHECK(inspect(MAKEINTRESOURCEW(602), MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL), false, 0, 702));
+    CHECK(inspect(L"OPENATL_PLAIN", MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL), false, 0, 702));
+    CHECK(inspect(MAKEINTRESOURCEW(606), MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL), true, 701, 704));
+    CHECK(inspect(MAKEINTRESOURCEW(607), MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL), false, 701, 704));
+    CHECK(inspect(MAKEINTRESOURCEW(652), MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), false, 781, 782));
+    CHECK(inspect(MAKEINTRESOURCEW(652), MAKELANGID(LANG_FRENCH, SUBLANG_FRENCH), true, 781, 782));
+    CHECK(!Split::SplitDialogTemplate(nullptr) && ::GetLastError() == ERROR_INVALID_PARAMETER);
+    for (UINT_PTR address : {UINT_PTR(1), UINT_PTR(-1)}) {
+        CHECK(!Split::FindFirstDlgItem(reinterpret_cast<const DLGTEMPLATE*>(address)) &&
+            ::GetLastError() == ERROR_RESOURCE_DATA_NOT_FOUND);
+        CHECK(!Split::FindNextDlgItem(reinterpret_cast<const DLGITEMTEMPLATE*>(address), FALSE) &&
+            ::GetLastError() == ERROR_RESOURCE_DATA_NOT_FOUND);
+    }
+    for (WORD id : {WORD(610), WORD(611), WORD(612), WORD(615), WORD(616), WORD(617), WORD(618), WORD(620), WORD(631)}) {
+        const HRSRC resource = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(5));
+        const HRSRC initialization = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(240));
+        CHECK(resource && initialization);
+        const auto dialog = static_cast<const DLGTEMPLATE*>(::LockResource(::LoadResource(instance, resource)));
+        const auto init = static_cast<const BYTE*>(::LockResource(::LoadResource(instance, initialization)));
+        GlobalSplitTemplate owned;
+        const auto split = Split::SplitDialogTemplate(dialog, init);
+        if (split && split != dialog) owned.memory = reinterpret_cast<HGLOBAL>(const_cast<DLGTEMPLATE*>(split));
+        if (id == 610 || id == 612 || id == 620) {
+            CHECK(split && owned.memory && ::GetLastError() == ERROR_SUCCESS && ::GlobalHandle(split) == owned.memory);
+        } else {
+            const DWORD expected = id == 611 || id == 617 || id == 631 ? ERROR_NOT_SUPPORTED : ERROR_INVALID_DATA;
+            CHECK(!split && ::GetLastError() == expected);
+        }
+        CHECK(!Split::SplitDialogTemplate(dialog, init + 1) && ::GetLastError() == ERROR_INVALID_DATA);
+    }
+    const HRSRC resource = ::FindResourceW(instance, MAKEINTRESOURCEW(602), MAKEINTRESOURCEW(5));
+    const auto original = static_cast<const DLGTEMPLATE*>(::LockResource(::LoadResource(instance, resource)));
+    struct ResourceModule {
+        HINSTANCE original;
+        ~ResourceModule() { ATL::_AtlBaseModule.SetResourceInstance(original); }
+    } changed{instance};
+    const HMODULE other = ::GetModuleHandleW(L"kernel32.dll");
+    CHECK(other);
+    ATL::_AtlBaseModule.SetResourceInstance(other);
+    CHECK(!Split::FindFirstDlgItem(original) && ::GetLastError() == ERROR_RESOURCE_DATA_NOT_FOUND);
+    ATL::_AtlBaseModule.SetResourceInstance(instance);
+    CHECK(Split::FindFirstDlgItem(original) && ::GetLastError() == ERROR_SUCCESS);
+    return true;
+}
 bool dialogTemplates() {
     using ATL::detail::AxDialogTemplate;
     using ATL::detail::BuildAxDialogTemplate;
@@ -1771,7 +1880,7 @@ int main(int argc, char** argv) {
     ULONG_PTR token = 0;
     if (::CoGetContextToken(&token) != CO_E_NOTINITIALIZED || !ATL::AtlAxWinInit() ||
         ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
-    if (!propertyMaps() || !propertyBrowsing() || !persistentProperties() || !authoredPropertyPages() || !propertyPageMetrics() || !dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
+    if (!propertyMaps() || !propertyBrowsing() || !persistentProperties() || !authoredPropertyPages() || !propertyPageMetrics() || !splitDialogResources() || !dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
     HRESULT hr = ::OleInitialize(nullptr); if (FAILED(hr)) return 1;
     bool ok = true;
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)

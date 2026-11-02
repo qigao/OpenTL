@@ -11,6 +11,7 @@
 #include <new>
 #include <cstring>
 #include "openatl/atl_dialog_template.h"
+#include "openatl/atl_dialog_split.h"
 
 namespace ATL {
 namespace detail {

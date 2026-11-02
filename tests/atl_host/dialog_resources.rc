@@ -654,3 +654,24 @@ BEGIN
     6902 L"Native property metadata"
     6903 L"openwtl-help.chm"
 END
+
+// Both language variants must be resolved by their actual resource addresses.
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+652 DIALOG 0, 0, 100, 60
+STYLE WS_POPUP | WS_CAPTION
+CAPTION "English resource span"
+BEGIN
+    CONTROL "", 781, "{8856F961-340A-11D0-A96B-00C04FD705A2}", WS_CHILD | WS_VISIBLE, 0, 0, 80, 30
+    LTEXT "English split", 782, 0, 45, 80, 12
+END
+
+LANGUAGE LANG_FRENCH, SUBLANG_FRENCH
+652 DIALOGEX 0, 0, 100, 60
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION
+CAPTION "French resource span"
+FONT 8, "MS Shell Dlg", 400, 0, 1
+BEGIN
+    CONTROL "", 781, "{8856F961-340A-11D0-A96B-00C04FD705A2}", WS_CHILD | WS_VISIBLE, 0, 0, 80, 30
+    LTEXT "French split", 782, 0, 45, 80, 12
+END
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
