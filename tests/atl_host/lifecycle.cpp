@@ -1185,7 +1185,26 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module) {
     REQUIRE(pageHandle != nullptr && sheet.AddPage(pageHandle));
     HWND sheetWindow = sheet.Create(nullptr);
     REQUIRE(sheetWindow && ::IsWindow(sheetWindow));
-    REQUIRE(page.initialized == 1 && page.m_hWnd && ::IsWindow(page.m_hWnd));
+    // Modeless property sheets can defer page activation. Ask the native
+    // sheet to select its first page; never manufacture the HWND or invoke
+    // application callbacks directly.
+    const LRESULT selection = ::SendMessageW(sheetWindow, PSM_SETCURSEL, 0, 0);
+    const HWND nativePage = reinterpret_cast<HWND>(
+        ::SendMessageW(sheetWindow, PSM_GETCURRENTPAGEHWND, 0, 0));
+    const bool pageReady = page.initialized == 1 &&
+        page.m_hWnd && ::IsWindow(page.m_hWnd) &&
+        nativePage == page.m_hWnd;
+    if (!pageReady) {
+        std::fprintf(stderr,
+            "WTL_AX_PAGE_FAIL selection=%lld native_page=%p bound_page=%p initialized=%d"
+            " page_count=%d active=%d last_error=%lu\\n",
+            static_cast<long long>(selection), static_cast<void*>(nativePage),
+            static_cast<void*>(page.m_hWnd), page.initialized,
+            sheet.GetPageCount(), sheet.GetActiveIndex(), ::GetLastError());
+        // Do not destroy the C++ owner while Windows still owns a page.
+        ::DestroyWindow(sheetWindow);
+        return false;
+    }
     HWND controlWindow = ::GetDlgItem(page.m_hWnd, 711);
     REQUIRE(controlWindow && ::IsWindow(controlWindow));
     ATL::CAxWindow control(controlWindow);

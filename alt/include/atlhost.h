@@ -940,7 +940,7 @@ inline BOOL CWindow::ExecuteDlgInit(UINT dialogId) noexcept {
             const char* source = reinterpret_cast<const char*>(record.stream.data());
             const int converted = ::MultiByteToWideChar(CP_ACP, 0, source, count, nullptr, 0);
             if (!converted) return FALSE;
-            PendingString item{child, list ? LB_ADDSTRING : CB_ADDSTRING,
+            PendingString item{child, static_cast<UINT>(list ? LB_ADDSTRING : CB_ADDSTRING),
                                std::wstring(static_cast<size_t>(converted), L'\0')};
             if (::MultiByteToWideChar(CP_ACP, 0, source, count,
                                       &item.value[0], converted) != converted) return FALSE;
