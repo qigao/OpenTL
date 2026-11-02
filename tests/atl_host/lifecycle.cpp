@@ -1314,26 +1314,30 @@ bool originalWtlAxPageFailedInit(ControlState& state, ATL::CAtlModule& module,
     const bool queryRejected = FAILED(query);
     const bool nativeFailure = page.createCalls == 1 &&
         page.createResult == E_FAIL && page.initialized == 0;
-    const bool controlRetired = state.loaded == 1 &&
-        state.activated == 0 && state.closed == 1 &&
-        state.destroyed == 1 && module.GetLockCount() == 0;
+    // A live Windows page can still own references and module locks after
+    // the control's failed Load. Require rejection/Close immediately, but
+    // require final COM destruction and module unlock only after Windows
+    // has destroyed the property sheet and its native child windows.
+    const bool failedLoadClosed = state.loaded == 1 &&
+        state.activated == 0 && state.closed == 1;
     const bool rejected = nativeBound && nativeFailure &&
-                          noControl && queryRejected && controlRetired;
+                          noControl && queryRejected && failedLoadClosed;
     const BOOL destroyed = ::DestroyWindow(window);
     const bool retired = destroyed && page.destroyed == 1 &&
-                         !page.m_hWnd && module.GetLockCount() == 0;
+                         !page.m_hWnd && state.destroyed == 1 &&
+                         state.closed == 1 && module.GetLockCount() == 0;
     if (!rejected || !retired) {
         std::fprintf(stderr,
             "WTL_AX_FAILED_INIT_TRACE rejected=%d retired=%d destroyed=%d"
             " native_page=%p page_before=%p page_after=%p bound=%d"
-            " native_fail=%d no_control=%d query_rejected=%d control_retired=%d"
+            " native_fail=%d no_control=%d query_rejected=%d failed_load_closed=%d"
             " child=%p control=%p query=%08lx"
             " create_calls=%d create_hr=%08lx init=%d destroy_callback=%d"
             " loaded=%d activated=%d closed=%d control_destroyed=%d"
             " module_lock=%ld last_error=%lu\n",
             rejected, retired, destroyed, static_cast<void*>(current),
             static_cast<void*>(pageBeforeDestroy), static_cast<void*>(page.m_hWnd),
-            nativeBound, nativeFailure, noControl, queryRejected, controlRetired,
+            nativeBound, nativeFailure, noControl, queryRejected, failedLoadClosed,
             static_cast<void*>(child), static_cast<void*>(object.p),
             static_cast<unsigned long>(query), page.createCalls,
             static_cast<unsigned long>(page.createResult), page.initialized,
