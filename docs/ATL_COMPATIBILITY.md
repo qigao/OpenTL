@@ -1181,3 +1181,35 @@ the fixed-width scalar encoding. The existing native suite tests both default
 and caller-selected limits, hostile encoded lengths, transactionality and
 retry. These checks do not establish Microsoft ATL version-specific wire
 interoperability.
+
+## COM property-page authoring foundation (qualification pending)
+
+`atlctl.h` exposes IPropertyPageImpl<T> and IPropertyPage2Impl<T> for native
+COM property-page objects. The class supplies T's CDialogImpl-style
+Create/DestroyWindow/m_hWnd implementation, COM map and application Apply
+logic. This is separate from ordinary WTL property-sheet pages and the gated
+WTL ActiveX page/wizard framework in #96; _ATL_NO_HOSTING remains defined.
+
+The initial subset owns page-site/object references, stages SetObjects before
+replacing the old array, embeds a native dialog, and provides Move/Show/
+Deactivate, CoTaskMemAlloc page-info strings, dirty notifications and dialog
+accelerator processing. SetDirty retains the page/site across notification,
+including release of the last external page owner in a callback. Reentrant
+site/object replacement and activation/deactivation transitions are rejected.
+Rectangles are checked in wide arithmetic before conversion to native sizes.
+The container must Deactivate before releasing its final page reference.
+
+Before GetPageInfo/activation, set m_size explicitly in pixels. Resource IDs
+m_dwTitle/m_dwDocString/m_dwHelpFile use the current resource instance and
+normal LoadStringW resource selection; no locale-specific resource policy or
+dialog-font/template size inference is implemented yet. Empty title ID zero
+returns an independently allocated empty title. The default Apply returns S_OK
+without applying properties; derived pages supply validation/update logic and
+clear dirty only on success. Help and EditProperty default to E_NOTIMPL.
+
+Existing native host cases exercise a real resource dialog over repeated
+activation/deactivation, metadata allocation/missing-resource cleanup, aliased
+object-array replacement, Apply failure/success, checked rectangle bounds and
+site callback final-reference release. This candidate does not qualify native
+OleCreatePropertyFrame integration, help dispatch, per-property selection or
+locale handling. #95 remains open until its remaining acceptance is complete.

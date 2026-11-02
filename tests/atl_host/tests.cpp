@@ -530,6 +530,128 @@ bool persistentProperties() {
     load.Release(); CHECK(targetState.destroyed == 1);
     return true;
 }
+struct AuthoredPageState { int destroyed=0, finalized=0, applies=0, notifications=0; bool valid=true; };
+class AuthoredPage : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+                     public ATL::CDialogImpl<AuthoredPage>, public ATL::IPropertyPage2Impl<AuthoredPage> {
+public:
+    enum { IDD=602 };
+    AuthoredPageState* state=nullptr;
+    LONG selected=918;
+    HRESULT applyFailure=S_OK;
+    bool destroyOnPosition=false;
+    AuthoredPage() { m_size={180,90}; }
+    ~AuthoredPage() { if (state) ++state->destroyed; }
+    void OnFinalMessage(HWND) override { if (state) ++state->finalized; }
+    LRESULT OnPosition(UINT,WPARAM,LPARAM,BOOL& handled) {
+        handled=FALSE;
+        if (destroyOnPosition) { destroyOnPosition=false; DestroyWindow(); }
+        return 0;
+    }
+    HRESULT STDMETHODCALLTYPE Apply() override {
+        ATL::CComPtr<IPropertyPage> self(this);
+        if (FAILED(applyFailure)) return applyFailure;
+        if (!m_nObjects) return E_UNEXPECTED;
+        for (ULONG i=0;i<m_nObjects;++i) {
+            ATL::CComPtr<IDispatch> object;
+            HRESULT hr=m_ppUnk[i]->QueryInterface(IID_IDispatch,reinterpret_cast<void**>(&object.p));
+            if (FAILED(hr)) return hr;
+            ATL::CComVariant value(selected); DISPID named=DISPID_PROPERTYPUT;
+            DISPPARAMS args{&value,&named,1,1};
+            hr=object->Invoke(11,IID_NULL,LOCALE_USER_DEFAULT,DISPATCH_PROPERTYPUT,&args,nullptr,nullptr,nullptr);
+            if (FAILED(hr)) return hr;
+        }
+        SetDirty(FALSE); if (state) ++state->applies; return S_OK;
+    }
+    BEGIN_COM_MAP(AuthoredPage)
+        COM_INTERFACE_ENTRY(IPropertyPage2)
+        COM_INTERFACE_ENTRY(IPropertyPage)
+    END_COM_MAP()
+    BEGIN_MSG_MAP(AuthoredPage)
+        MESSAGE_HANDLER(WM_WINDOWPOSCHANGED, OnPosition)
+    END_MSG_MAP()
+};
+class AuthoredPageSite : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>, public IPropertyPageSite {
+public:
+    AuthoredPageState* state=nullptr;
+    IPropertyPage* page=nullptr;
+    IPropertyPage* drop=nullptr;
+    HRESULT STDMETHODCALLTYPE OnStatusChange(DWORD flags) override {
+        ++state->notifications;
+        state->valid=flags==PROPPAGESTATUS_DIRTY && page->IsPageDirty()==S_OK && state->valid;
+        if (drop) { auto release=drop; drop=nullptr; release->Release(); }
+        return E_ACCESSDENIED; // Notification failure does not undo dirty state.
+    }
+    HRESULT STDMETHODCALLTYPE GetLocaleID(LCID* locale) override { if (!locale) return E_POINTER; *locale=0x409; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetPageContainer(IUnknown** output) override { if (!output) return E_POINTER; *output=nullptr; return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE TranslateAccelerator(MSG*) override { return E_NOTIMPL; }
+    BEGIN_COM_MAP(AuthoredPageSite)
+        COM_INTERFACE_ENTRY(IPropertyPageSite)
+    END_COM_MAP()
+};
+bool authoredPropertyPages() {
+    AuthoredPageState state; PersistenceState objectState;
+    ATL::CComObject<PersistentObject>* object=nullptr;
+    CHECK(ATL::CComObject<PersistentObject>::CreateInstance(&object)==S_OK); object->state=&objectState; object->AddRef();
+    ATL::CComPtr<IPersistPropertyBag> bound; bound.Attach(object);
+    ATL::CComObject<AuthoredPage>* authored=nullptr;
+    CHECK(ATL::CComObject<AuthoredPage>::CreateInstance(&authored)==S_OK); authored->state=&state; authored->AddRef();
+    ATL::CComPtr<IPropertyPage2> page; page.Attach(authored);
+    ATL::CComObject<AuthoredPageSite>* frameSite=nullptr;
+    CHECK(ATL::CComObject<AuthoredPageSite>::CreateInstance(&frameSite)==S_OK); frameSite->state=&state; frameSite->page=page; frameSite->AddRef();
+    ATL::CComPtr<IPropertyPageSite> site; site.Attach(frameSite);
+    RECT rect{0,0,180,90}; MSG message{}; PROPPAGEINFO info{},again{};
+    CHECK(page->Activate(::GetDesktopWindow(),&rect,FALSE)==E_UNEXPECTED && page->SetPageSite(nullptr)==E_UNEXPECTED);
+    CHECK(page->SetPageSite(site)==S_OK && page->SetPageSite(site)==E_UNEXPECTED);
+    IUnknown* objects[]={bound.p}; IUnknown* bad[]={nullptr};
+    CHECK(page->SetObjects(1,nullptr)==E_POINTER && page->SetObjects(1,bad)==E_POINTER);
+    CHECK(page->SetObjects(1,objects)==S_OK && object->AddRef()==3 && object->Release()==2);
+    CHECK(page->SetObjects(1,authored->m_ppUnk)==S_OK && object->AddRef()==3 && object->Release()==2);
+    CHECK(page->GetPageInfo(nullptr)==E_POINTER && page->GetPageInfo(&info)==S_OK &&
+        page->GetPageInfo(&again)==S_OK && info.cb==sizeof(info) && info.pszTitle &&
+        !info.pszTitle[0] && info.pszTitle!=again.pszTitle && info.size.cx==180 && info.size.cy==90);
+    ::CoTaskMemFree(info.pszTitle); ::CoTaskMemFree(again.pszTitle);
+    authored->m_dwDocString=65535; info={};
+    CHECK(page->GetPageInfo(&info)==HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND) && !info.pszTitle && !info.cb);
+    authored->m_dwDocString=0;
+    CHECK(page->Move(&rect)==E_UNEXPECTED && page->Deactivate()==E_UNEXPECTED && page->IsPageDirty()==S_FALSE);
+    for (int cycle=0;cycle<2;++cycle) {
+        const RECT overflow{(std::numeric_limits<LONG>::min)(),0,(std::numeric_limits<LONG>::max)(),90};
+        CHECK(page->Activate(::GetDesktopWindow(),&overflow,FALSE)==E_INVALIDARG);
+        CHECK(page->Activate(::GetDesktopWindow(),nullptr,FALSE)==E_POINTER);
+        CHECK(page->Activate(::GetDesktopWindow(),&rect,FALSE)==S_OK && ::IsWindow(authored->m_hWnd));
+        HWND window=authored->m_hWnd;
+        CHECK(page->Activate(::GetDesktopWindow(),&rect,TRUE)==E_UNEXPECTED);
+        CHECK(page->Move(nullptr)==E_POINTER && page->Move(&overflow)==E_INVALIDARG && page->Move(&rect)==S_OK && page->Show(SW_SHOW)==S_OK &&
+            page->Show(SW_HIDE)==S_OK && page->Show(SW_MINIMIZE)==E_INVALIDARG);
+        CHECK(page->TranslateAccelerator(nullptr)==E_POINTER && page->TranslateAccelerator(&message)==S_FALSE &&
+            page->EditProperty(11)==E_NOTIMPL && page->Help(nullptr)==E_NOTIMPL);
+        authored->SetDirty(TRUE); CHECK(page->IsPageDirty()==S_OK);
+        authored->applyFailure=E_ACCESSDENIED;
+        CHECK(page->Apply()==E_ACCESSDENIED && page->IsPageDirty()==S_OK && objectState.number!=918);
+        authored->applyFailure=S_OK;
+        CHECK(page->Apply()==S_OK && page->IsPageDirty()==S_FALSE && objectState.number==918);
+        objectState.number=314;
+        CHECK(page->Deactivate()==S_OK && !::IsWindow(window) && !authored->m_hWnd);
+    }
+    CHECK(state.finalized==2 && state.applies==2 && state.notifications==2 && state.valid);
+    authored->destroyOnPosition=true;
+    CHECK(FAILED(page->Activate(::GetDesktopWindow(),&rect,FALSE)) && !authored->m_hWnd);
+    HWND parent=::CreateWindowExW(0,L"STATIC",L"property-page parent",WS_POPUP,
+        0,0,200,120,nullptr,nullptr,::GetModuleHandleW(nullptr),nullptr);
+    CHECK(parent && page->Activate(parent,&rect,FALSE)==S_OK);
+    CHECK(::DestroyWindow(parent) && !authored->m_hWnd);
+    CHECK(page->Show(SW_SHOW)==E_UNEXPECTED && page->Move(&rect)==E_UNEXPECTED &&
+        page->TranslateAccelerator(&message)==E_UNEXPECTED && page->Deactivate()==E_UNEXPECTED);
+    CHECK(state.finalized==4);
+    CHECK(page->SetObjects(0,nullptr)==S_OK && object->AddRef()==2 && object->Release()==1);
+    CHECK(page->SetPageSite(nullptr)==S_OK && frameSite->AddRef()==2 && frameSite->Release()==1);
+    // Callback retires the last outside page owner while SetDirty holds self.
+    CHECK(page->SetPageSite(site)==S_OK);
+    frameSite->drop=page.Detach(); authored->SetDirty(TRUE);
+    CHECK(state.destroyed==1 && !frameSite->drop && state.valid);
+    frameSite->page=nullptr; bound.Release(); CHECK(objectState.destroyed==1);
+    return true;
+}
 size_t DialogBytesFind(const std::vector<BYTE>& bytes, const void* value, size_t size) {
     const auto first = static_cast<const BYTE*>(value);
     return static_cast<size_t>(std::search(bytes.begin(), bytes.end(), first, first + size) - bytes.begin());
@@ -1366,7 +1488,7 @@ int main(int argc, char** argv) {
     ULONG_PTR token = 0;
     if (::CoGetContextToken(&token) != CO_E_NOTINITIALIZED || !ATL::AtlAxWinInit() ||
         ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
-    if (!propertyMaps() || !propertyBrowsing() || !persistentProperties() || !dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
+    if (!propertyMaps() || !propertyBrowsing() || !persistentProperties() || !authoredPropertyPages() || !dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
     HRESULT hr = ::OleInitialize(nullptr); if (FAILED(hr)) return 1;
     bool ok = true;
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)

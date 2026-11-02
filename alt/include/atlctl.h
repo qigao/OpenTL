@@ -7,6 +7,7 @@
 #include <olectl.h>
 #include <objsafe.h>
 #include <vector>
+#include "openatl/property_page.h"
 
 // mingw-w64's objsafe.h declares the IID but omits its C++ __uuidof binding.
 #ifdef __CRT_UUID_DECL
