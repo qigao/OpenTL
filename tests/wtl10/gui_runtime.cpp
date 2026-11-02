@@ -198,8 +198,40 @@ public:
     }
 };
 
+static bool check_window_text()
+{
+    HWND raw = ::CreateWindowExW(0, L"EDIT", L"", WS_POPUP,
+                                0, 0, 80, 30, NULL, NULL,
+                                ::GetModuleHandleW(NULL), NULL);
+    if (!raw) return false;
+
+    // Weasel's CEdit consumer uses the inherited CWindow CString overload.
+    // Keep its real text/control behavior in this existing UI-only test.
+    WTL::CEdit edit(raw);
+    const ATL::CWindow& window = edit;
+    std::wstring expected(4096, L'\u4e2d');
+    expected += L"-\u6587-\U0001f642";
+    ATL::CString text(L"stale");
+    bool ok = edit.SetWindowText(expected.c_str()) &&
+        edit.GetWindowText(text) == static_cast<int>(expected.size()) &&
+        text.GetLength() == static_cast<int>(expected.size()) &&
+        text.Compare(expected.c_str()) == 0;
+
+    wchar_t bounded[4] = {};
+    ok = ok && window.GetWindowText(bounded, 4) == 3 &&
+        bounded[0] == L'\u4e2d' && bounded[2] == L'\u4e2d' && bounded[3] == 0;
+    ok = ok && edit.SetWindowText(L"short") &&
+        window.GetWindowText(text) == 5 && text.Compare(L"short") == 0;
+    ok = ok && edit.SetWindowText(L"") &&
+        window.GetWindowText(text) == 0 && text.IsEmpty();
+
+    const bool destroyed = ::DestroyWindow(raw) != FALSE;
+    return ok && destroyed;
+}
+
 static bool check_window()
 {
+    if (!check_window_text()) return false;
     for (int i = 0; i < 12; ++i) {
         ProbeWindow wnd;
         wnd.handle_nc_destroy = (i & 1) != 0;

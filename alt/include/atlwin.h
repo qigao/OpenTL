@@ -7,6 +7,7 @@
 #pragma once
 
 #include "atlbase.h"
+#include "atlstr.h"
 
 #include <commctrl.h>
 #include <olectl.h>
@@ -597,6 +598,18 @@ public:
     {
         ATLASSERT(::IsWindow(m_hWnd));
         return ::GetWindowText(m_hWnd, lpszStringBuf, nMaxCount);
+    }
+
+    int GetWindowText(CString& strText) const
+    {
+        ATLASSERT(::IsWindow(m_hWnd));
+        const int length = ::GetWindowTextLength(m_hWnd);
+        if (length == INT_MAX)
+            AtlThrow(E_OUTOFMEMORY);
+        LPTSTR buffer = strText.GetBuffer(length + 1);
+        const int copied = ::GetWindowText(m_hWnd, buffer, length + 1);
+        strText.ReleaseBuffer(copied);
+        return copied;
     }
 
     int GetWindowTextLength() const noexcept
