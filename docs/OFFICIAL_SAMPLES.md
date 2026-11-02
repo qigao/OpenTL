@@ -235,6 +235,9 @@ through actual process-local class factories and CoCreateInstance. It checks
 all eight original GetName routes, specific/blind/lazy aggregation, chained
 identity, tear-off caching/lifetime, first/partial construction failure cleanup,
 real embedded ITypeInfo::Invoke and the original Error/EXCEPINFO path.
+The registered IOuter IDispatch path additionally qualifies parameter-name
+lookup, named invocation, BSTR-to-I2 conversion and `puArgErr` for a failed
+conversion through Windows' real ITypeInfo implementation.
 
 This required OBJECT_ENTRY_AUTO to coalesce identical type/CLSID/callback
 records across translation units, matching the original header usage. Different
