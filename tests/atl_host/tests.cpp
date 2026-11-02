@@ -1354,8 +1354,23 @@ public:
 private:
     ATL::CComPtr<IDispatch> sink;
 };
+// Keep the original WTL presence guard: MSVC inspects the member, while the
+// existing MinGW compatibility macro includes the guarded body unconditionally.
+template<class T> HRESULT WtlAdviseSinkMap(T* object, bool advise) {
+    HRESULT result = E_NOTIMPL;
+    __if_exists(T::_GetSinkMapFinder) {
+        result = ATL::AtlAdviseSinkMap(object, advise);
+    }
+    return result;
+}
 class Sink : public ATL::IDispEventSimpleImpl<7, Sink, &EventIID> {
 public:
+    IUnknown* mappedSource = nullptr; // Borrowed for the map test's scope.
+    HRESULT GetDlgControl(int id, REFIID iid, void** output) {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        return id == 7 && mappedSource ? mappedSource->QueryInterface(iid, output) : E_FAIL;
+    }
     inline static ATL::_ATL_FUNC_INFO scalar = {CC_STDCALL, VT_EMPTY, 3, {VT_I4, VT_BOOL, VT_BSTR}};
     inline static ATL::_ATL_FUNC_INFO ref = {CC_STDCALL, VT_EMPTY, 1, {VT_VARIANT | VT_BYREF}};
     inline static ATL::_ATL_FUNC_INFO throwing = {CC_STDCALL, VT_EMPTY, 0, {}};
@@ -1378,6 +1393,17 @@ public:
     bool good = false;
 };
 bool events() {
+    struct SinklessOwner {} sinkless;
+    CHECK(ATL::AtlAdviseSinkMap(&sinkless, true) == S_OK);
+    CHECK(ATL::AtlAdviseSinkMap(&sinkless, false) == S_OK);
+    CHECK(ATL::AtlAdviseSinkMap<SinklessOwner>(nullptr, true) == E_POINTER);
+#ifdef _OPENATL_DEFINED_MSC_VER
+    CHECK(WtlAdviseSinkMap(&sinkless, true) == S_OK);
+#else
+    CHECK(WtlAdviseSinkMap(&sinkless, true) == E_NOTIMPL);
+#endif
+    CHECK(Sink::_GetSinkMapFinder() == Sink::_GetSinkMap());
+    CHECK(WtlAdviseSinkMap<Sink>(nullptr, true) == E_POINTER);
     ATL::CComPtr<Source> source; source.Attach(new Source);
     ATL::CComPtr<Source> other; other.Attach(new Source);
     auto unknown = static_cast<IConnectionPointContainer*>(source.p);
@@ -1440,6 +1466,21 @@ bool events() {
         CHECK(sink.DispEventAdvise(unknown) == S_OK);
     }
     CHECK(source->advises == 2 && source->unadvises == 2 && source->refs == 1);
+    {
+        Sink sink;
+        sink.mappedSource = unknown;
+        CHECK(WtlAdviseSinkMap(&sink, true) == S_OK);
+        CHECK(WtlAdviseSinkMap(&sink, true) == CONNECT_E_ADVISELIMIT);
+        ATL::CComVariant value(51L);
+        VARIANTARG reference{}; reference.vt = VT_VARIANT | VT_BYREF; reference.pvarVal = &value;
+        DISPPARAMS params = {&reference, nullptr, 1, 0};
+        CHECK(source->Fire(2, params) == S_OK && value.lVal == 52);
+        sink.mappedSource = nullptr; // Unadvise must use the retained point.
+        CHECK(WtlAdviseSinkMap(&sink, false) == S_OK);
+        CHECK(source->Fire(2, params) == CONNECT_E_NOCONNECTION);
+        CHECK(WtlAdviseSinkMap(&sink, false) == S_OK);
+    }
+    CHECK(source->advises == 3 && source->unadvises == 3 && source->refs == 1);
     return true;
 }
 class BrowserSink : public ATL::CWindow, public ATL::IDispEventImpl<1, BrowserSink, &DIID_DWebBrowserEvents2> {
@@ -1593,7 +1634,7 @@ bool browser() {
         DOCHOSTUIINFO info{}; info.cbSize = sizeof(info);
         CHECK(ui->GetHostInfo(&info) == S_OK && (info.dwFlags & DOCHOSTUIFLAG_THEME));
         BrowserSink sink(parent.window);
-        CHECK(ATL::AtlAdviseSinkMap(&sink, true) == S_OK);
+        CHECK(WtlAdviseSinkMap(&sink, true) == S_OK);
         ATL::CComVariant url(L"about:blank#openatl"), empty;
         BrowserPhase(cycle, "navigating");
         CHECK(browser->Navigate2(&url, &empty, &empty, &empty, &empty) == S_OK);
@@ -1613,7 +1654,7 @@ bool browser() {
         CHECK(RunBrowserUIHandlerTest(window, html));
         html.Release(); html = document;
         CHECK(html.p != nullptr);
-        CHECK(ATL::AtlAdviseSinkMap(&sink, false) == S_OK);
+        CHECK(WtlAdviseSinkMap(&sink, false) == S_OK);
         ATL::CComPtr<IOleObject> object;
         CHECK(browser->QueryInterface(IID_IOleObject, reinterpret_cast<void**>(&object)) == S_OK);
         ATL::CComPtr<IAxWinHostWindow> host;

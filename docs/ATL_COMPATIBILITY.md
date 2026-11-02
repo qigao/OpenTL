@@ -863,6 +863,22 @@ they are not confused with an already disconnected sink.
 Recursive map operations on one owner fail E_UNEXPECTED. No global binding
 registry, implicit COM initialization or automatic owner deletion is added.
 
+BEGIN_SINK_MAP also exposes _GetSinkMapFinder for the presence check used by
+original WTL CAxPropertyPageImpl. It returns the same repository-owned table as
+_GetSinkMap; it does not introduce Microsoft ATL's internal map ABI. The global
+AtlAdviseSinkMap accepts a non-null owner without a sink map as an empty operation
+(S_OK), and rejects a null owner (E_POINTER). CAxDialogImpl uses this same path.
+This also makes WTL's guarded call well-formed on the existing MinGW __if_exists
+compatibility path, where the guarded body is included unconditionally. On MSVC,
+the original guard still omits that body for a sinkless owner.
+
+Existing event and hosted-browser cases exercise the unmodified WTL guard pattern
+with actual subscription, callback and retained-point unsubscription. This is one
+prerequisite of #96, not admission of the whole ActiveX property-page framework:
+bounded dialog splitting, its DLGINIT stream/license integration and the original
+page lifecycle still require implementation and qualification. _ATL_NO_HOSTING
+remains defined, and no WTL source files, test modes or targets are added.
+
 Existing native core cases cover mixed sink types, repeated entries, preflight,
 subscription/rollback failures, reentrant callbacks, retained metadata, partial
 Unadvise/retry and rebinding. Existing Value/AuxValue DLL aggregation/activation

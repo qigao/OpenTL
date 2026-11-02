@@ -647,7 +647,20 @@ template<UINT id, class T> struct SinkMapBinding {
 };
 }
 
-template<class T> HRESULT AtlAdviseSinkMap(T* object, bool advise) noexcept {
+namespace detail {
+template<class T, class = void> struct HasAxSinkMap : std::false_type {};
+template<class T> struct HasAxSinkMap<T, std::void_t<decltype(T::_GetSinkMap())>> : std::true_type {};
+}
+
+// WTL's __if_exists bridge is unconditional on the MinGW compatibility path.
+// A sinkless dialog has no subscriptions to change, matching CAxDialogImpl.
+template<class T, std::enable_if_t<!detail::HasAxSinkMap<T>::value, int> = 0>
+HRESULT AtlAdviseSinkMap(T* object, bool /*advise*/) noexcept {
+    return object ? S_OK : E_POINTER;
+}
+
+template<class T, std::enable_if_t<detail::HasAxSinkMap<T>::value, int> = 0>
+HRESULT AtlAdviseSinkMap(T* object, bool advise) noexcept {
     if (!object) return E_POINTER;
     auto owner = static_cast<typename T::_OpenATLSinkMapOwner*>(object);
     bool& changing = object->_OpenATLSinkMapChanging;
@@ -709,6 +722,7 @@ template<class T> HRESULT AtlAdviseSinkMap(T* object, bool advise) noexcept {
 public: \
     using _OpenATLSinkMapOwner = x; \
     bool _OpenATLSinkMapChanging = false; \
+    static const ATL::detail::EventEntry* _GetSinkMapFinder() { return _GetSinkMap(); } \
     static const ATL::detail::EventEntry* _GetSinkMap() { \
         using _SinkClass = x; \
         static const ATL::detail::EventEntry entries[] = {
