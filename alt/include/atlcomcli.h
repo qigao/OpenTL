@@ -754,6 +754,30 @@ public:
         return S_OK;
     }
 
+    // Exact successful wire length for the supported scalar/BSTR subset.
+    // As in ATL, sizeof(VARTYPE) indicates an unsupported/overflow result;
+    // it is also a valid size for VT_EMPTY and VT_NULL.
+    ULONG GetSize() const noexcept
+    {
+        const int bytes = StreamScalarSize(vt);
+        if (bytes >= 0)
+            return static_cast<ULONG>(sizeof(VARTYPE)) +
+                   static_cast<ULONG>(bytes);
+        if (vt != VT_BSTR)
+            return static_cast<ULONG>(sizeof(VARTYPE));
+
+        constexpr ULONG envelope =
+            static_cast<ULONG>(sizeof(VARTYPE) + sizeof(ULONG));
+        if (!bstrVal)
+            return envelope;
+        const ULONG payload = ::SysStringByteLen(bstrVal);
+        const ULONG terminator = static_cast<ULONG>(sizeof(OLECHAR));
+        if (payload > (std::numeric_limits<ULONG>::max)() -
+                      envelope - terminator)
+            return static_cast<ULONG>(sizeof(VARTYPE));
+        return envelope + payload + terminator;
+    }
+
     // Bounded stream subset: no implicit coercion or COM activation.
     HRESULT WriteToStream(IStream* stream) noexcept
     {

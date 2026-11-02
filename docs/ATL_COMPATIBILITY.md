@@ -1162,6 +1162,18 @@ contract and ownership, not interoperability with every Microsoft ATL release.
 EMPTY/NULL and I8/UI8 stream representations in particular still require
 independent target-version ATL evidence before claiming interoperability.
 The public CComVariant methods do not coerce unsupported values through BSTR.
+For the admitted scalar/BSTR subset, CComVariant::GetSize() now matches
+the successful WriteToStream byte count: VARTYPE + fixed scalar bytes,
+or VARTYPE + ULONG + nullable BSTR bytes and terminator. It returns
+sizeof(VARTYPE) for unsupported values and on BSTR size overflow,
+consistent with the documented error marker. VT_EMPTY and VT_NULL also
+have that legitimate two-byte stream length; the caller must check
+the variant type rather than interpreting the size alone as success.
+It does not query IPersistStream/IPersistStreamInit or activate interface
+values, because those values are intentionally unsupported here.
+The existing real IStream suite compares GetSize() with native Stat()
+for all admitted scalar tags and null/allocated-empty/binary BSTRs.
+
 The same 16 MiB one-argument budget applies to VT_BSTR inside VARIANT;
 ReadFromStream(stream, maxBstrPayloadBytes) bounds the nested BSTR before
 allocation. Scalar records do not allocate, and the budget does not change

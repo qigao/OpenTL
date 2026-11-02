@@ -278,6 +278,11 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
             value.WriteToStream(encoded)!=S_OK ||
             encoded->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK)
             return failure(88,"VARIANT_scalar_write",E_FAIL);
+        STATSTG scalarInfo{};
+        if (value.GetSize()!=sizeof(VARTYPE)+scalarSizes[i] ||
+            encoded->Stat(&scalarInfo,STATFLAG_NONAME)!=S_OK ||
+            scalarInfo.cbSize.QuadPart!=value.GetSize())
+            return failure(109,"VARIANT_scalar_GetSize_matches_stream",E_FAIL);
         VARTYPE tag=VT_EMPTY;
         unsigned char actual[8]{};
         if (encoded->Read(&tag,sizeof(tag),&read)!=S_OK || read!=sizeof(tag) ||
@@ -298,12 +303,19 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
         variantRead.ReadFromStream(variantStream)!=S_OK || variantRead!=variantText ||
         variantRead.ReadFromStream(variantStream)!=STG_E_READFAULT || variantRead!=variantText)
         return failure(90,"VARIANT_BSTR_stream_ownership",E_FAIL);
+    STATSTG variantTextInfo{};
+    if (variantText.GetSize()!=sizeof(VARTYPE)+sizeof(ULONG)+
+                                 a.ByteLength()+sizeof(OLECHAR) ||
+        variantStream->Stat(&variantTextInfo,STATFLAG_NONAME)!=S_OK ||
+        variantTextInfo.cbSize.QuadPart!=variantText.GetSize())
+        return failure(110,"VARIANT_BSTR_GetSize_matches_stream",E_FAIL);
     ATL::CComVariant rejected;
     rejected.vt=VT_BYREF|VT_I4;
     rejected.plVal=nullptr;
     STATSTG before{},after{};
     if (variantStream->Stat(&before,STATFLAG_NONAME)!=S_OK ||
         rejected.WriteToStream(variantStream)!=DISP_E_BADVARTYPE ||
+        rejected.GetSize()!=sizeof(VARTYPE) ||
         variantStream->Stat(&after,STATFLAG_NONAME)!=S_OK ||
         before.cbSize.QuadPart!=after.cbSize.QuadPart ||
         variantRead.ReadFromStream(nullptr)!=E_POINTER ||
@@ -373,6 +385,7 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
         unsigned char actual[11]{};
         if (::CreateStreamOnHGlobal(nullptr,TRUE,&output)!=S_OK ||
             value.WriteToStream(output)!=S_OK ||
+            value.GetSize()!=sizeof(VARTYPE)+sizes[i] ||
             output->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK ||
             output->Read(actual,sizes[i]+sizeof(tag),&read)!=S_OK ||
             read!=sizes[i]+sizeof(tag) || actual[0]!=VT_BSTR || actual[1] ||
