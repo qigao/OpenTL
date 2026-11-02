@@ -301,8 +301,14 @@ struct PropertyState {
     int bound = 0, unbound = 0, activated = 0, deactivated = 0, shown = 0, applied = 0, nested = 0;
     LONG value = 9;
 };
+inline constexpr IID OriginalWtlPageEventIID = {0xb348ee50, 0xbe2a, 0x420a,
+    {0xb7,0xa8,0x03,0x93,0x9a,0x86,0x64,0x5c}};
+class Control;
 struct ControlState {
     CLSID classId{};
+    bool wizardEvents = false;
+    Control* activeEventControl = nullptr;
+    int eventAdvises = 0, eventUnadvises = 0;
     bool siteFirst = true, initInterface = true, failInit = false, destroyDuringInit = false;
     bool siteOrder = true, licenseSeen = false;
     bool storageInterface = true, storageReadOnly = true, rejectLicense = false, destroyDuringStorageQuery = false;
@@ -316,7 +322,8 @@ struct ControlState {
 };
 class Control : public IOleObject, public IPersistStreamInit, public IPersistStream, public IPersistStorage,
                 public IRunnableObject, public ATL::ISpecifyPropertyPagesImpl<Control>,
-                public IDispatch, public ATL::IPerPropertyBrowsingImpl<Control> {
+                public IDispatch, public ATL::IPerPropertyBrowsingImpl<Control>,
+                public IConnectionPointContainer, public IConnectionPoint {
 public:
     BEGIN_PROP_MAP(Control)
         PROP_ENTRY_TYPE("Extent", 1, MappedNativePageClass, VT_I4)
@@ -324,10 +331,16 @@ public:
         PROP_PAGE(MappedNativePageClass)
         PROP_ENTRY_TYPE("Unpaged", 3, CLSID_NULL, VT_I4)
     END_PROP_MAP()
-    explicit Control(ControlState& state) : state_(state) {}
+    explicit Control(ControlState& state) : state_(state) {
+        if (state_.wizardEvents) state_.activeEventControl = this;
+    }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** value) override {
         if (!value) return E_POINTER; *value = nullptr;
         if (iid == IID_IUnknown || iid == IID_IOleObject) *value = static_cast<IOleObject*>(this);
+        else if (state_.wizardEvents && iid == IID_IConnectionPointContainer)
+            *value = static_cast<IConnectionPointContainer*>(this);
+        else if (state_.wizardEvents && iid == IID_IConnectionPoint)
+            *value = static_cast<IConnectionPoint*>(this);
         else if (iid == IID_IPersistStreamInit && state_.initInterface) *value = static_cast<IPersistStreamInit*>(this);
         else if (iid == IID_IPersist || iid == IID_IPersistStream) *value = static_cast<IPersistStream*>(this);
         else if (iid == IID_IPersistStorage && state_.storageInterface) {
@@ -348,6 +361,48 @@ public:
     }
     ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
     ULONG STDMETHODCALLTYPE Release() override { const auto n = --refs_; if (!n) delete this; return n; }
+    HRESULT STDMETHODCALLTYPE EnumConnectionPoints(IEnumConnectionPoints**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE FindConnectionPoint(REFIID iid, IConnectionPoint** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (!state_.wizardEvents || iid != OriginalWtlPageEventIID) return CONNECT_E_NOCONNECTION;
+        return QueryInterface(IID_IConnectionPoint, reinterpret_cast<void**>(output));
+    }
+    HRESULT STDMETHODCALLTYPE GetConnectionInterface(IID* output) override {
+        if (!output) return E_POINTER;
+        *output = OriginalWtlPageEventIID;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetConnectionPointContainer(IConnectionPointContainer** output) override {
+        return QueryInterface(IID_IConnectionPointContainer, reinterpret_cast<void**>(output));
+    }
+    HRESULT STDMETHODCALLTYPE Advise(IUnknown* target, DWORD* cookie) override {
+        if (!target || !cookie) return E_POINTER;
+        *cookie = 0;
+        if (!state_.wizardEvents) return CONNECT_E_NOCONNECTION;
+        if (eventSink_.p) return CONNECT_E_ADVISELIMIT;
+        ATL::CComPtr<IDispatch> selected;
+        HRESULT hr = target->QueryInterface(OriginalWtlPageEventIID,
+                                            reinterpret_cast<void**>(&selected.p));
+        if (FAILED(hr)) return hr;
+        if (!selected.p) return E_UNEXPECTED;
+        eventSink_ = std::move(selected);
+        *cookie = 42; ++state_.eventAdvises;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Unadvise(DWORD cookie) override {
+        if (cookie != 42 || !eventSink_.p) return CONNECT_E_NOCONNECTION;
+        eventSink_.Release(); ++state_.eventUnadvises;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE EnumConnections(IEnumConnections**) override { return E_NOTIMPL; }
+    HRESULT FireWizardEvent(long value) {
+        if (!eventSink_.p) return CONNECT_E_NOCONNECTION;
+        VARIANTARG argument{}; argument.vt = VT_I4; argument.lVal = value;
+        DISPPARAMS params{&argument, nullptr, 1, 0};
+        return eventSink_->Invoke(1, IID_NULL, LOCALE_USER_DEFAULT, DISPATCH_METHOD,
+                                  &params, nullptr, nullptr, nullptr);
+    }
     HRESULT STDMETHODCALLTYPE GetTypeInfoCount(UINT* count) override { if (!count) return E_POINTER; *count = 0; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetTypeInfo(UINT, LCID, ITypeInfo**) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID, LPOLESTR*, UINT, LCID, DISPID*) override { return E_NOTIMPL; }
@@ -501,9 +556,13 @@ private:
         return state_.failInit || !state_.siteOrder || (state_.failInitializationAt &&
             state_.initialized + state_.loaded + state_.storageLoaded == state_.failInitializationAt) ? E_FAIL : S_OK;
     }
-    ~Control() { ++state_.destroyed; }
+    ~Control() {
+        if (state_.activeEventControl == this) state_.activeEventControl = nullptr;
+        ++state_.destroyed;
+    }
     ULONG refs_ = 1;
     ControlState& state_;
+    ATL::CComPtr<IDispatch> eventSink_;
     ATL::CComPtr<IOleClientSite> site_;
     ATL::CComPtr<IStorage> storage_;
 };
@@ -1151,9 +1210,17 @@ public:
 };
 // Exercise original, unmodified WTL 10.0 CAxPropertyPageImpl through a real
 // modeless Windows property sheet, not the ATL CAxDialogImpl substitute.
-class OriginalWtlAxPage : public WTL::CAxPropertyPageImpl<OriginalWtlAxPage> {
+class OriginalWtlAxPage : public WTL::CAxPropertyPageImpl<OriginalWtlAxPage>,
+                          public ATL::IDispEventSimpleImpl<711, OriginalWtlAxPage, &OriginalWtlPageEventIID> {
 public:
     enum { IDD = 665 };
+    int eventsReceived = 0;
+    long lastEventValue = 0;
+    inline static ATL::_ATL_FUNC_INFO eventSignature = {CC_STDCALL, VT_EMPTY, 1, {VT_I4}};
+    void __stdcall OnNativeEvent(long number) { ++eventsReceived; lastEventValue = number; }
+    BEGIN_SINK_MAP(OriginalWtlAxPage)
+        SINK_ENTRY_INFO(711, OriginalWtlPageEventIID, 1, OnNativeEvent, &eventSignature)
+    END_SINK_MAP()
     int initialized = 0, destroyed = 0, createCalls = 0;
     int wizardNext = 0;
     bool vetoWizardNext = false;
@@ -1405,6 +1472,7 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
                          REFCLSID registeredId) {
     state = ControlState{};
     state.classId = registeredId;
+    state.wizardEvents = true;
     state.discoverWindow = true;
     state.siteFirst = true;
     state.streamBytes = 8;
@@ -1429,6 +1497,9 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
             ax.initialized == 1 && ax.createCalls == 1 &&
             ax.createResult == S_OK && state.activated == 1 &&
             state.loaded == 1 && !state.closed);
+    REQUIRE(state.activeEventControl && state.eventAdvises == 1 &&
+            state.activeEventControl->FireWizardEvent(41) == S_OK &&
+            ax.eventsReceived == 1 && ax.lastEventValue == 41);
     // A real Next press must honor the original WTL page's negative return:
     // no page switch, no COM reinitialization, no early close.
     ax.vetoWizardNext = true;
@@ -1437,13 +1508,19 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
     REQUIRE(reinterpret_cast<HWND>(
                 ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0)) ==
                 ax.m_hWnd && ax.wizardNext == 1 &&
-            ax.createCalls == 1 && state.activated == 1 && !state.closed);
+            ax.createCalls == 1 && state.activated == 1 && !state.closed &&
+            state.activeEventControl &&
+            state.activeEventControl->FireWizardEvent(42) == S_OK &&
+            ax.eventsReceived == 2 && ax.lastEventValue == 42);
     ax.vetoWizardNext = false;
     ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_NEXT, 0);
     REQUIRE(NativeWizardSelected(sheet, ordinary.m_hWnd));
     REQUIRE(ax.wizardNext == 2 && ordinary.activations >= 1 &&
             state.activated == 1 && !state.closed &&
-            ax.m_hWnd && ::IsWindow(ax.m_hWnd));
+            ax.m_hWnd && ::IsWindow(ax.m_hWnd) &&
+            state.activeEventControl &&
+            state.activeEventControl->FireWizardEvent(43) == S_OK &&
+            ax.eventsReceived == 3 && ax.lastEventValue == 43);
     // Back veto must also be respected by the native sheet.
     ordinary.vetoWizardBack = true;
     ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_BACK, 0);
@@ -1451,16 +1528,24 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
     REQUIRE(reinterpret_cast<HWND>(
                 ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0)) ==
                 ordinary.m_hWnd && ordinary.wizardBack == 1 &&
-            state.activated == 1 && !state.closed);
+            state.activated == 1 && !state.closed &&
+            state.activeEventControl &&
+            state.activeEventControl->FireWizardEvent(44) == S_OK &&
+            ax.eventsReceived == 4 && ax.lastEventValue == 44);
     ordinary.vetoWizardBack = false;
     ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_BACK, 0);
     REQUIRE(NativeWizardSelected(sheet, ax.m_hWnd));
     REQUIRE(ordinary.wizardBack == 2 && ax.wizardNext == 2 &&
             ax.createCalls == 1 && ax.initialized == 1 &&
-            state.activated == 1 && state.loaded == 1 && !state.closed);
+            state.activated == 1 && state.loaded == 1 && !state.closed &&
+            state.activeEventControl &&
+            state.activeEventControl->FireWizardEvent(45) == S_OK &&
+            ax.eventsReceived == 5 && ax.lastEventValue == 45);
     REQUIRE(::DestroyWindow(sheet));
     REQUIRE(!ax.m_hWnd && !ordinary.m_hWnd &&
             ax.destroyed == 1 && state.closed == 1 &&
+            state.eventAdvises == 1 && state.eventUnadvises == 1 &&
+            !state.activeEventControl &&
             state.destroyed == 1 && module.GetLockCount() == 0);
     return true;
 }
