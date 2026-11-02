@@ -145,21 +145,34 @@ public:
     HRESULT STDMETHODCALLTYPE GetPageInfo(PROPPAGEINFO* output) override {
         if (!output) return E_POINTER;
         *output={};
-        SIZE desired=m_size;
-        if (!desired.cx && !desired.cy) {
-            const HRESULT sizeResult=ResourceSize<T>(desired,0);
-            if (FAILED(sizeResult)) return sizeResult;
-        } else if (desired.cx <= 0 || desired.cy <= 0) return E_UNEXPECTED;
-        PROPPAGEINFO staged{}; staged.cb=sizeof(staged); staged.size=desired;
-        staged.dwHelpContext=m_dwHelpContext;
-        HRESULT hr=LoadText(m_dwTitle,&staged.pszTitle,true);
-        if (SUCCEEDED(hr)) hr=LoadText(m_dwDocString,&staged.pszDocString,false);
-        if (SUCCEEDED(hr)) hr=LoadText(m_dwHelpFile,&staged.pszHelpFile,false);
-        if (FAILED(hr)) {
-            ::CoTaskMemFree(staged.pszTitle); ::CoTaskMemFree(staged.pszDocString);
-            ::CoTaskMemFree(staged.pszHelpFile); return hr;
-        }
-        *output=staged; return S_OK;
+        try {
+            CComPtr<IPropertyPage> self(this);
+            CComPtr<IPropertyPageSite> site(m_pPageSite);
+            LANGID language=0;
+            if (site) {
+                LCID locale=LOCALE_NEUTRAL;
+                HRESULT hr=site->GetLocaleID(&locale);
+                if (FAILED(hr)) return hr;
+                if (hr!=S_OK) return E_UNEXPECTED;
+                const LANGID selected=LANGIDFROMLCID(locale);
+                if (selected!=MAKELANGID(LANG_NEUTRAL,SUBLANG_NEUTRAL)) language=selected;
+            }
+            SIZE desired=m_size;
+            if (!desired.cx && !desired.cy) {
+                const HRESULT sizeResult=ResourceSize<T>(desired,0);
+                if (FAILED(sizeResult)) return sizeResult;
+            } else if (desired.cx <= 0 || desired.cy <= 0) return E_UNEXPECTED;
+            PROPPAGEINFO staged{}; staged.cb=sizeof(staged); staged.size=desired;
+            staged.dwHelpContext=m_dwHelpContext;
+            HRESULT hr=LoadText(m_dwTitle,&staged.pszTitle,true,language);
+            if (SUCCEEDED(hr)) hr=LoadText(m_dwDocString,&staged.pszDocString,false,language);
+            if (SUCCEEDED(hr)) hr=LoadText(m_dwHelpFile,&staged.pszHelpFile,false,language);
+            if (FAILED(hr)) {
+                ::CoTaskMemFree(staged.pszTitle); ::CoTaskMemFree(staged.pszDocString);
+                ::CoTaskMemFree(staged.pszHelpFile); return hr;
+            }
+            *output=staged; return S_OK;
+        } catch (...) { return detail::PropertyPageException(); }
     }
     HRESULT STDMETHODCALLTYPE Show(UINT command) override {
         if (!OwnsWindow()) return E_UNEXPECTED;
@@ -225,13 +238,51 @@ private:
         for (ULONG i=0;i<count;++i) objects[i]->Release();
         delete[] objects;
     }
-    static HRESULT LoadText(UINT id, LPOLESTR* output, bool required) noexcept {
+    static HRESULT LocalizedText(HINSTANCE instance,UINT id,LANGID language,
+                                 LPCWSTR& resource,int& count) noexcept {
+        resource=nullptr; count=0;
+        if (!language) return S_FALSE;
+        const UINT block=id/16+1;
+        if (block>0xffff) return S_FALSE;
+        ::SetLastError(ERROR_SUCCESS);
+        const HRSRC found=::FindResourceExW(instance,RT_STRING,
+            MAKEINTRESOURCEW(block),language);
+        if (!found) return S_FALSE; // No exact site locale: retain normal Windows fallback.
+        const DWORD bytes=::SizeofResource(instance,found);
+        const HGLOBAL loaded=::LoadResource(instance,found);
+        const auto first=static_cast<const WORD*>(loaded ? ::LockResource(loaded) : nullptr);
+        if (!loaded || !first || bytes%sizeof(WORD)) {
+            const DWORD error=::GetLastError();
+            return HRESULT_FROM_WIN32(error ? error : ERROR_INVALID_DATA);
+        }
+        const auto end=first+bytes/sizeof(WORD);
+        auto cursor=first;
+        for (UINT slot=0;slot<=id%16;++slot) {
+            if (cursor==end) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+            const WORD length=*cursor++;
+            if (static_cast<SIZE_T>(end-cursor)<length)
+                return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+            if (slot==id%16) {
+                if (!length) return HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);
+                resource=reinterpret_cast<LPCWSTR>(cursor);
+                count=length;
+                return S_OK;
+            }
+            cursor+=length;
+        }
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    }
+    static HRESULT LoadText(UINT id, LPOLESTR* output, bool required,
+                            LANGID language) noexcept {
         *output=nullptr;
         LPCWSTR resource=L"";
         int count=0;
         if (id) {
-            count=::LoadStringW(_AtlBaseModule.GetResourceInstance(),id,
-                reinterpret_cast<LPWSTR>(&resource),0);
+            const HINSTANCE instance=_AtlBaseModule.GetResourceInstance();
+            const HRESULT localized=LocalizedText(instance,id,language,resource,count);
+            if (FAILED(localized)) return localized;
+            if (localized==S_FALSE)
+                count=::LoadStringW(instance,id,reinterpret_cast<LPWSTR>(&resource),0);
             if (count<=0) return HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);
         } else if (!required) return S_OK;
         const SIZE_T bytes=(static_cast<SIZE_T>(count)+1)*sizeof(WCHAR);

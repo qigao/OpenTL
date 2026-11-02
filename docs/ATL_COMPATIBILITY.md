@@ -1298,9 +1298,12 @@ The container must Deactivate before releasing its final page reference.
 
 A positive m_size explicitly overrides the page size in pixels. With both fields
 zero, GetPageInfo uses the bounded current-context resource measurement below.
-Resource IDs m_dwTitle/m_dwDocString/m_dwHelpFile use the current resource instance
-and normal LoadStringW resource selection; no locale-specific resource policy is
-implemented yet. Empty title ID zero
+Resource IDs m_dwTitle/m_dwDocString/m_dwHelpFile use the current resource instance.
+When a page site is attached, GetPageInfo obtains its LCID and selects that
+language's string-table block before copying metadata. If no matching localized
+block exists, normal LoadStringW selection remains the fallback. Failed locale
+callbacks propagate, and non-S_OK success is rejected without partial output.
+Calls made before SetPageSite retain normal resource selection. Empty title ID zero
 returns an independently allocated empty title. The default Apply returns S_OK
 without applying properties; derived pages supply validation/update logic and
 clear dirty only on success. EditProperty follows ATL's documented E_NOTIMPL
@@ -1310,9 +1313,12 @@ Help is currently E_NOTIMPL here and remains an implementation gap.
 Existing native host cases exercise a real resource dialog over repeated
 activation/deactivation, metadata allocation/missing-resource cleanup, aliased
 object-array replacement, Apply failure/success, checked rectangle bounds and
-site callback final-reference release. This candidate does not qualify native
-OleCreatePropertyFrame integration, help dispatch, per-property selection or
-locale handling. #95 remains open until its remaining acceptance is complete.
+site callback final-reference release. English/French metadata cases use the
+site's actual LCID, preserve independent CoTaskMem copies and propagate failed
+locale callbacks with empty output. A locale callback can release the last
+outside page reference; GetPageInfo retains itself and the site through copied
+output and destroys the page only after returning. Help dispatch remains an
+independent gap, so #95 stays open.
 
 ### Authored pages in the native property frame (qualification pending)
 
@@ -1325,10 +1331,11 @@ site/object/window cleanup counters. There is no second property-frame engine.
 
 Direct page-info cases load nonzero title/doc/help resource IDs, verify copied
 strings are independent, and verify cleanup when a later resource field fails.
-The native frame uses the same repository-owned metadata resources. These are
-pending native execution; successful site-LCID propagation does not establish
-locale-specific resource selection or help UI. Font/template size inference
-is a separate candidate described below.
+The native frame uses the same repository-owned metadata resources. Explicit
+English and French site locales select distinct string-table blocks; neutral or
+missing localized blocks retain normal Windows resource fallback. This does not
+claim Help UI. Font/template size inference is a separate candidate described
+below.
 
 ### Preactivation page-size inference (qualification pending)
 
@@ -1381,9 +1388,11 @@ OleCreatePropertyFrameIndirect with two different initial DISPIDs. Windows owns
 IPerPropertyBrowsing mapping, IPropertyPage2 discovery and EditProperty dispatch;
 the case checks the selected field's actual focus and real Apply versus Cancel,
 site/object/window release and owner enabled state. No test mode or budget is added.
-Help invocation, locale-specific resource policy, special message fonts and future
-parent per-monitor DPI behavior remain independent work under #95.
+Help invocation, special message fonts and future-parent per-monitor DPI behavior
+remain independent work under #95.
 
 References: [IPropertyPage2Impl default](https://learn.microsoft.com/en-us/cpp/atl/reference/ipropertypage2impl-class),
 [initial property selection](https://learn.microsoft.com/en-us/windows/win32/api/olectl/nf-olectl-olecreatepropertyframeindirect),
-[dialog styles](https://learn.microsoft.com/en-us/windows/win32/dlgbox/dialog-box-styles).
+[dialog styles](https://learn.microsoft.com/en-us/windows/win32/dlgbox/dialog-box-styles),
+[localized page metadata](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/ns-ocidl-proppageinfo),
+[language-specific resources](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-findresourceexw).
