@@ -1652,8 +1652,14 @@ bool originalWtlWizardUserCancel(ControlState& state, ATL::CAtlModule& module,
     page.vetoCancel = false;
     ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_CANCEL, 0);
     if (::IsWindow(sheet)) REQUIRE(NativeWizardDispatchPending(sheet));
+    // Modeless PropertySheet need not destroy the top-level window after
+    // native Cancel. Win32's completion signal is that no current page
+    // remains; the application then owns the final DestroyWindow(sheet).
+    const bool cancelled = !::IsWindow(sheet) ||
+        ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0) == 0;
+    REQUIRE(cancelled && page.cancelQueries == 2 && page.resetCalls == 1);
+    if (::IsWindow(sheet)) REQUIRE(::DestroyWindow(sheet));
     REQUIRE(!::IsWindow(sheet) && !page.m_hWnd &&
-            page.cancelQueries == 2 && page.resetCalls == 1 &&
             page.destroyed == 1 && state.activated == 1 &&
             state.closed == 1 && state.detached == 1 &&
             state.destroyed == 1 && module.GetLockCount() == 0);
