@@ -820,10 +820,21 @@ size_t DialogBytesFind(const std::vector<BYTE>& bytes, const void* value, size_t
 bool dialogTemplates() {
     using ATL::detail::AxDialogTemplate;
     using ATL::detail::BuildAxDialogTemplate;
+    using ATL::detail::SplitAxDialogTemplate;
     const HINSTANCE instance = ATL::_AtlBaseModule.GetResourceInstance();
     const WCHAR clsid[] = L"{8856F961-340A-11D0-A96B-00C04FD705A2}";
     const WCHAR sibling[] = L"resource sibling";
     const WORD staticClass[] = {0xFFFF, 0x82};
+    const auto sameInitialization = [](const AxDialogTemplate& left, const AxDialogTemplate& right)->bool {
+        CHECK(left.initialization.size() == right.initialization.size());
+        for (size_t n = 0; n < left.initialization.size(); ++n) {
+            const auto& a = left.initialization[n];
+            const auto& b = right.initialization[n];
+            CHECK(a.id == b.id && a.kind == b.kind && a.name == b.name &&
+                a.license == b.license && a.stream == b.stream);
+        }
+        return true;
+    };
     for (WORD id : {WORD(602), WORD(606), WORD(607)}) {
         HRSRC resource = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(5));
         CHECK(resource);
@@ -834,7 +845,27 @@ bool dialogTemplates() {
         AxDialogTemplate built;
         CHECK(BuildAxDialogTemplate(original, size, built) == ERROR_SUCCESS && built.converted == (id != 602));
         CHECK(std::memcmp(original, snapshot.data(), size) == 0 && reinterpret_cast<UINT_PTR>(built.Get()) % 4 == 0);
+        AxDialogTemplate split;
+        const int callbacksBefore = MetricsDialogCallbacks;
+        CHECK(SplitAxDialogTemplate(original, size, split) == ERROR_SUCCESS &&
+            split.converted == (id != 602) && split.initialization.empty() &&
+            MetricsDialogCallbacks == callbacksBefore && reinterpret_cast<UINT_PTR>(split.Get()) % 4 == 0);
+        WORD remaining = 0;
+        std::memcpy(&remaining, reinterpret_cast<const BYTE*>(split.Get()) + (id == 606 ? 16 : 8), sizeof(remaining));
+        CHECK(remaining == 1 && std::memcmp(original, snapshot.data(), size) == 0);
+        SIZE originalSize{}, splitSize{};
+        CHECK(ATL::detail::PropertyPageDialogSize(original, size, originalSize) == S_OK &&
+            ATL::detail::PropertyPageDialogSize(split.Get(), split.size, splitSize) == S_OK &&
+            originalSize.cx == splitSize.cx && originalSize.cy == splitSize.cy);
+        MetricsDialogWindow native;
+        native.window = ::CreateDialogIndirectParamW(instance, split.Get(), ::GetDesktopWindow(), MetricsDialogProcedure, 0);
+        CHECK(native.window && !::GetDlgItem(native.window, 701));
+        WCHAR nativeLabel[32]{};
+        CHECK(::GetDlgItemTextW(native.window, id == 602 ? 702 : 704, nativeLabel, 32) &&
+            std::wcscmp(nativeLabel, id == 602 ? L"native" : sibling) == 0);
         AxDialogTemplate again;
+        CHECK(SplitAxDialogTemplate(split.Get(), split.size, again) == ERROR_SUCCESS && !again.converted &&
+            again.size == split.size && std::memcmp(again.Get(), split.Get(), split.size) == 0);
         CHECK(BuildAxDialogTemplate(built.storage.data(), built.size, again) == ERROR_SUCCESS && !again.converted);
         CHECK(again.size == built.size && std::memcmp(again.storage.data(), built.storage.data(), built.size) == 0);
         if (id == 602) {
@@ -851,8 +882,14 @@ bool dialogTemplates() {
         CHECK(std::memcmp(original, converted, cls) == 0); // Header/font and first fixed record.
         CHECK(size - oldStatic == bytes.size() - newStatic);
         CHECK(std::memcmp(original + oldStatic - fixed, converted + newStatic - fixed, size - oldStatic + fixed) == 0);
+        const auto splitBytes = reinterpret_cast<const BYTE*>(split.Get());
+        const std::vector<BYTE> splitSnapshot(splitBytes, splitBytes + split.size);
+        const size_t splitStatic = DialogBytesFind(splitSnapshot, staticClass, sizeof(staticClass));
+        CHECK(splitStatic >= fixed && splitStatic < split.size && size - oldStatic == split.size - splitStatic);
+        CHECK(std::memcmp(original + oldStatic - fixed, splitBytes + splitStatic - fixed, size - oldStatic + fixed) == 0);
         for (size_t cut = 0; cut <= size - 8; ++cut) {
             CHECK(BuildAxDialogTemplate(original, cut, again) == ERROR_INVALID_DATA && again.storage.empty() && !again.converted && !again.size);
+            CHECK(SplitAxDialogTemplate(original, cut, again) == ERROR_INVALID_DATA && again.storage.empty() && !again.converted && !again.size);
         }
         std::vector<BYTE> bad = snapshot;
         const WORD tooMany = 3;
@@ -861,6 +898,7 @@ bool dialogTemplates() {
         bad = snapshot; const WCHAR invalidHex = L'G';
         std::memcpy(bad.data() + cls + sizeof(WCHAR), &invalidHex, sizeof(invalidHex));
         CHECK(BuildAxDialogTemplate(bad.data(), bad.size(), again) == ERROR_INVALID_DATA);
+        CHECK(SplitAxDialogTemplate(bad.data(), bad.size(), again) == ERROR_INVALID_DATA && again.storage.empty());
         bad = snapshot; const WORD inlineData = 4;
         std::memcpy(bad.data() + cls + sizeof(clsid) + sizeof(WORD), &inlineData, sizeof(inlineData));
         CHECK(BuildAxDialogTemplate(bad.data(), bad.size(), again) == ERROR_NOT_SUPPORTED);
@@ -876,6 +914,18 @@ bool dialogTemplates() {
         bad.insert(bad.end(), payload, payload + sizeof(payload));
         CHECK(BuildAxDialogTemplate(bad.data(), bad.size(), again) == ERROR_SUCCESS && again.converted);
         CHECK(std::memcmp(reinterpret_cast<const BYTE*>(again.storage.data()) + again.size - sizeof(payload), payload, sizeof(payload)) == 0);
+        CHECK(SplitAxDialogTemplate(bad.data(), bad.size(), again) == ERROR_SUCCESS && again.converted);
+        CHECK(std::memcmp(reinterpret_cast<const BYTE*>(again.Get()) + again.size - sizeof(payload), payload, sizeof(payload)) == 0);
+        // All controls may be removed, for either native template format.
+        bad.assign(snapshot.begin(), snapshot.begin() + oldStatic - fixed);
+        const WORD oneControl = 1;
+        std::memcpy(bad.data() + (id == 606 ? 16 : 8), &oneControl, sizeof(oneControl));
+        CHECK(SplitAxDialogTemplate(bad.data(), bad.size(), again) == ERROR_SUCCESS && again.converted);
+        std::memcpy(&remaining, reinterpret_cast<const BYTE*>(again.Get()) + (id == 606 ? 16 : 8), sizeof(remaining));
+        CHECK(remaining == 0);
+        MetricsDialogWindow emptyNative;
+        emptyNative.window = ::CreateDialogIndirectParamW(instance, again.Get(), ::GetDesktopWindow(), MetricsDialogProcedure, 0);
+        CHECK(emptyNative.window && !::GetWindow(emptyNative.window, GW_CHILD));
         if (id == 606) {
             bad = snapshot; const WORD unsupportedVersion = 2;
             std::memcpy(bad.data(), &unsupportedVersion, sizeof(unsupportedVersion));
@@ -896,6 +946,18 @@ bool dialogTemplates() {
         CHECK(built.initialization[0].id == 711 && built.initialization[0].stream.size() == (id == 619 ? 5U : 4U));
         CHECK(built.initialization[0].license == ((id == 612 || id == 619) ? L"OpenATL-test-license" : L""));
         CHECK(std::memcmp(initBytes, snapshot.data(), initSize) == 0);
+        AxDialogTemplate split;
+        if (id == 611) {
+            CHECK(SplitAxDialogTemplate(bytes, size, split, initBytes, initSize) == ERROR_NOT_SUPPORTED &&
+                split.storage.empty() && split.initialization.empty());
+        } else {
+            CHECK(SplitAxDialogTemplate(bytes, size, split, initBytes, initSize) == ERROR_SUCCESS && split.converted &&
+                sameInitialization(split, built));
+            MetricsDialogWindow native;
+            native.window = ::CreateDialogIndirectParamW(instance, split.Get(), ::GetDesktopWindow(), MetricsDialogProcedure, 0);
+            CHECK(native.window && !::GetDlgItem(native.window, 711) && !::GetDlgItem(native.window, 712) &&
+                ::GetDlgItem(native.window, 714));
+        }
         for (size_t cut = 0; cut + 3 < initSize; ++cut) {
             CHECK(BuildAxDialogTemplate(bytes, size, built, initBytes, cut) == ERROR_INVALID_DATA && built.storage.empty() && built.initialization.empty());
         }
@@ -903,6 +965,8 @@ bool dialogTemplates() {
         const DWORD oversized = MAXDWORD;
         std::memcpy(bad.data() + 4, &oversized, sizeof(oversized));
         CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
+        CHECK(SplitAxDialogTemplate(bytes, size, split, bad.data(), bad.size()) == ERROR_INVALID_DATA &&
+            split.storage.empty() && split.initialization.empty());
         bad = snapshot; std::memcpy(bad.data() + 8, &oversized, sizeof(oversized));
         CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
         bad = snapshot; const WORD unmatched = 799;
@@ -943,6 +1007,13 @@ bool dialogTemplates() {
             CHECK(built.initialization[1].stream.size() == 4 && built.initialization[1].stream[0] == 42);
         }
         CHECK(std::memcmp(initBytes, snapshot.data(), initSize) == 0);
+        AxDialogTemplate split;
+        if (id == 621) {
+            CHECK(SplitAxDialogTemplate(bytes, size, split, initBytes, initSize) == ERROR_NOT_SUPPORTED);
+        } else {
+            CHECK(SplitAxDialogTemplate(bytes, size, split, initBytes, initSize) == ERROR_SUCCESS &&
+                split.converted && sameInitialization(split, built));
+        }
         for (size_t cut = 0; cut < minimum; ++cut) {
             CHECK(BuildAxDialogTemplate(bytes, size, built, initBytes, cut) == ERROR_INVALID_DATA && built.storage.empty() && built.initialization.empty());
         }
@@ -980,6 +1051,13 @@ bool dialogTemplates() {
             CHECK(built.initialization[2].id == 713 && built.initialization[2].kind == ATL::detail::AxDialogInit::Kind::Stream);
         }
         CHECK(std::memcmp(initBytes, snapshot.data(), initSize) == 0);
+        AxDialogTemplate split;
+        if (id == 632) {
+            CHECK(SplitAxDialogTemplate(bytes, size, split, initBytes, initSize) == ERROR_NOT_SUPPORTED);
+        } else {
+            CHECK(SplitAxDialogTemplate(bytes, size, split, initBytes, initSize) == ERROR_SUCCESS &&
+                split.converted && sameInitialization(split, built));
+        }
         for (size_t cut = 0; cut < minimum; ++cut) {
             CHECK(BuildAxDialogTemplate(bytes, size, built, initBytes, cut) == ERROR_INVALID_DATA && built.storage.empty() && built.initialization.empty());
         }
@@ -1003,6 +1081,9 @@ bool dialogTemplates() {
         CHECK(built.initialization[0].id == 711 && built.initialization[0].kind == ATL::detail::AxDialogInit::Kind::ListString);
         CHECK(built.initialization[1].id == 711 && !std::strcmp(reinterpret_cast<const char*>(built.initialization[1].stream.data()), "alpha"));
         CHECK(built.initialization[2].id == 712 && built.initialization[5].stream.size() == 1);
+        AxDialogTemplate split;
+        CHECK(SplitAxDialogTemplate(bytes, size, split, initBytes, initSize) == ERROR_SUCCESS && !split.converted &&
+            split.size == size && !std::memcmp(bytes, split.Get(), size) && sameInitialization(split, built));
         const size_t minimum = 74; // Six headers, their counted bytes and the terminator.
         CHECK(initSize >= minimum && initSize - minimum <= 3);
         for (size_t cut = 0; cut < minimum; ++cut) {

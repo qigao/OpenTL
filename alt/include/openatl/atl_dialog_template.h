@@ -57,8 +57,10 @@ public:
             text, static_cast<int>(count), TRUE) == CSTR_EQUAL;
     }
 };
+enum class AxDialogTemplateMode { HostControls, SplitControls };
 inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTemplate& output,
-    const void* initData = nullptr, size_t initSize = 0) noexcept {
+    const void* initData = nullptr, size_t initSize = 0,
+    AxDialogTemplateMode mode = AxDialogTemplateMode::HostControls) noexcept {
     output = {};
     if (!data) return ERROR_INVALID_DATA;
     try {
@@ -126,6 +128,7 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
         if ((style & DS_SETFONT) && (!reader.Skip(extended ? 6 : 2) || !reader.Array(font, false))) return ERROR_INVALID_DATA;
         std::vector<BYTE> result(reader.bytes, reader.bytes + reader.position);
         bool converted = false;
+        WORD removed = 0;
         for (WORD n = 0; n < count; ++n) {
             if (!reader.Align()) return ERROR_INVALID_DATA;
             const size_t start = reader.position;
@@ -182,6 +185,20 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
                 if (clsid[37] != L'}' || ::CLSIDFromString(clsid, &parsed) != S_OK) return ERROR_INVALID_DATA;
                 if (itemTitle.ordinal || itemTitle.end - itemTitle.begin != sizeof(WORD)) return ERROR_NOT_SUPPORTED;
             }
+            if (mode == AxDialogTemplateMode::SplitControls) {
+                // WTL creates raw CLSID-class controls after the native page.
+                // Explicit AtlAxWin controls with persistence need the existing
+                // host-dialog lifecycle; do not silently discard their data.
+                if (!clsidClass) return ERROR_NOT_SUPPORTED;
+                if (record) {
+                    record->name.resize((itemClass.end - itemClass.begin) / sizeof(WCHAR) - 1);
+                    std::memcpy(&record->name[0], reader.bytes + itemClass.begin,
+                        record->name.size() * sizeof(WCHAR));
+                    orderedInitialization.push_back(std::move(*record));
+                }
+                ++removed; converted = true;
+                continue;
+            }
             static constexpr WCHAR host[] = L"AtlAxWin140";
             result.insert(result.end(), reader.bytes + start, reader.bytes + itemClass.begin);
             const auto hostBytes = reinterpret_cast<const BYTE*>(host);
@@ -200,6 +217,10 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
         }
         for (bool found : matched) if (!found) return ERROR_INVALID_DATA;
         result.insert(result.end(), reader.bytes + reader.position, reader.bytes + size);
+        if (removed) {
+            const WORD remaining = static_cast<WORD>(count - removed);
+            std::memcpy(result.data() + (extended ? 16 : 8), &remaining, sizeof(remaining));
+        }
         // Unchanged resources retain their exact bytes, including padding.
         const BYTE* finalBytes = converted ? result.data() : reader.bytes;
         const size_t finalSize = converted ? result.size() : size;
@@ -213,6 +234,13 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
     } catch (const std::bad_alloc&) { return ERROR_NOT_ENOUGH_MEMORY; }
       catch (const std::length_error&) { return ERROR_NOT_ENOUGH_MEMORY; }
       catch (...) { return ERROR_INVALID_DATA; }
+}
+// Size-bearing foundation for WTL's split-then-create lifecycle. The returned
+// storage is owned by output; it is not the legacy GlobalAlloc wrapper.
+inline DWORD SplitAxDialogTemplate(const void* data, size_t size, AxDialogTemplate& output,
+    const void* initData = nullptr, size_t initSize = 0) noexcept {
+    return BuildAxDialogTemplate(data, size, output, initData, initSize,
+        AxDialogTemplateMode::SplitControls);
 }
 } }
 #endif

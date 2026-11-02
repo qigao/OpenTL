@@ -945,6 +945,29 @@ storage saving/switching, full control-splitting/property pages, advanced OLE
 accelerators and full composite controls remain open. Header-independent and
 exact internal layout compatibility remain unqualified.
 
+The size-bearing internal SplitAxDialogTemplate helper reuses this same bounded
+reader for #96's split-then-create path. It removes validated raw CLSID-class
+controls, updates the native item count and retains ordinary controls in their
+original order, including opaque creation data. Standard/extended header, font,
+geometry and help information are retained. Templates without removed controls
+keep their exact bytes. The output owns DWORD-aligned storage; it does not borrow
+the input or call window/application procedures, initialize COM or activate a
+control. Failures clear the output instead of publishing a partial template.
+
+Supported DLGINIT envelopes are validated with the existing ID/order/bounds rules
+and retained as owned typed initialization records. In this split mode, an
+explicit AtlAxWin control with persistence returns ERROR_NOT_SUPPORTED; its
+initialization belongs to the existing explicit host-dialog path. The splitter
+does not run or silently discard that initialization. Existing native tests
+create the resulting ordinary dialogs directly, verify removed/retained child
+IDs, unchanged sibling records and font geometry, and cover empty results,
+truncated templates, malformed CLSIDs and counted license/stream ownership.
+
+This is the bounded splitting foundation, not the legacy _DialogSplitHelper raw
+pointer/GlobalAlloc API. Resource-span discovery, legacy item traversal and
+DLGINIT stream adapters, and original WTL property-page lifecycle qualification
+remain separate work. _ATL_NO_HOSTING remains defined.
+
 DLGINIT stream records (message 0x0376) are bounded by the resource size. Each
 record has a WORD control ID, WORD message and DWORD payload length, followed
 by a DWORD UTF-16 license character count, that many characters (no terminator),
