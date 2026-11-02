@@ -964,8 +964,8 @@ IDs, unchanged sibling records and font geometry, and cover empty results,
 truncated templates, malformed CLSIDs and counted license/stream ownership.
 
 The legacy resource adapters below build on this bounded splitting foundation.
-DLGINIT stream adapters and original WTL property-page lifecycle qualification
-remain separate work. _ATL_NO_HOSTING remains defined.
+Original WTL property-page lifecycle qualification remains separate work.
+_ATL_NO_HOSTING remains defined.
 
 With atlhost.h included, _DialogSplitHelper now provides IsDialogEx,
 DlgTemplateItemCount, FindFirstDlgItem, FindNextDlgItem, IsActiveXControl and
@@ -993,6 +993,37 @@ page's CreateControlLic IStream path cannot express the explicit host's IStorage
 initialization contract. Stream/INITNEW/string envelope validation does not yet
 qualify their later original-page execution. No window is created by these
 helpers, and the complete ActiveX page framework remains gated off.
+
+FindCreateData resolves an actual DLGINIT resource span and uses the shared
+ReadAxDialogInit envelope reader. It returns a borrowed, read-only payload view
+(through the legacy BYTE** spelling) and its exact encoded length. Absent
+initialization, a missing ID or an empty INITNEW entry yields zero length and a null view with
+ERROR_SUCCESS. Malformed data, unknown pointers, string-entry selection and
+storage records fail with a Win32 last-error code; they do not become stream
+initialization. The constructor's SplitDialogTemplate also validates dialog-ID
+binding before the original WTL caller reaches this lookup.
+
+ParseInitData accepts WTL's native seekable HGlobal stream and output-only BSTR
+storage, initially empty as in the original caller's CComBSTR. It clears the
+output, bounds the DWORD UTF-16 character count using native Seek/Stat and the
+same license-length rule as the resource reader, and publishes the allocated key
+only after a complete read. Zero characters mean no key; embedded NUL characters
+retain their counted length. A null stream is the INITNEW path. A non-null stream
+stays a real persistence stream after a zero-character prefix, including when its
+logical remaining size is zero. The decoder does not change the stream's size.
+
+On success the stream is positioned immediately after the key, leaving opaque
+persisted bytes intact. Failed HRESULTs propagate; short/truncated reads return
+STG_E_READFAULT. Seek/Stat are required, and unexpected non-S_OK success from them
+returns E_UNEXPECTED. Failed reads may advance the cursor. Stat bounds the key's
+extent, not a caller's allocation budget; generic stream callers validate their
+encoded length/budget. Original resource-envelope validation remains separate
+from HGlobal allocation capacity/padding. Existing cases reproduce WTL's actual
+GlobalAlloc/Lock/copy/CreateStream ownership, exercise stream/INITNEW distinctions,
+and reuse the COM-client fault fixture for both key transfers and Seek/Stat.
+The native HGlobal stream reports EOF as S_OK with zero bytes read, as documented
+in the [memory-stream comparison](https://learn.microsoft.com/en-us/windows/win32/api/shlwapi/nf-shlwapi-shcreatememstream).
+Required key bytes are checked by transfer count even when Read returns S_OK.
 
 DLGINIT stream records (message 0x0376) are bounded by the resource size. Each
 record has a WORD control ID, WORD message and DWORD payload length, followed

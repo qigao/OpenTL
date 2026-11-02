@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <thread>
 #include <algorithm>
+#include "../stream_transfer_fault.h"
 bool RunHostLifecycleTests();
 bool RunBrowserUIHandlerTest(ATL::CAxWindow&, IHTMLDocument2*);
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)
@@ -826,6 +827,127 @@ struct GlobalSplitTemplate {
         memory = nullptr; return true;
     }
 };
+bool dialogInitStreams() {
+    namespace Split = ATL::_DialogSplitHelper;
+    const HINSTANCE instance = ATL::_AtlBaseModule.GetResourceInstance();
+    BYTE* payload = reinterpret_cast<BYTE*>(1);
+    CHECK(!Split::FindCreateData(711, nullptr, &payload) && !payload && ::GetLastError() == ERROR_SUCCESS);
+    CHECK(!Split::FindCreateData(711, nullptr, nullptr) && ::GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(!Split::FindCreateData(711, reinterpret_cast<const BYTE*>(1), &payload) &&
+        !payload && ::GetLastError() == ERROR_RESOURCE_DATA_NOT_FOUND);
+    for (WORD id : {WORD(610), WORD(612), WORD(614), WORD(619), WORD(620), WORD(622), WORD(625)}) {
+        const HRSRC resource = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(240));
+        CHECK(resource);
+        const auto init = static_cast<const BYTE*>(::LockResource(::LoadResource(instance, resource)));
+        const DWORD size = ::SizeofResource(instance, resource);
+        const std::vector<BYTE> snapshot(init, init + size);
+        for (WORD control = 711; control <= (id == 614 || id == 622 ? 712 : 711); ++control) {
+            const DWORD length = Split::FindCreateData(control, init, &payload);
+            CHECK(::GetLastError() == ERROR_SUCCESS);
+            const bool initNew = id == 620 || (id == 622 && control == 711);
+            const bool licensed = id == 612 || id == 619;
+            const DWORD expected = initNew ? 0 : id == 625 ? 4 : id == 612 ? 48 : id == 619 ? 49 : 8;
+            CHECK(length == expected && (payload != nullptr) == !initNew);
+            ATL::CComPtr<IStream> stream;
+            if (length) {
+                CHECK(payload >= init && static_cast<size_t>(payload - init) + length <= size);
+                // Match original WTL's GlobalAlloc/Lock/copy/CreateStream path.
+                GlobalSplitTemplate memory;
+                memory.memory = ::GlobalAlloc(GHND, length);
+                CHECK(memory.memory);
+                void* copied = ::GlobalLock(memory.memory);
+                CHECK(copied); std::memcpy(copied, payload, length); ::GlobalUnlock(memory.memory);
+                CHECK(::CreateStreamOnHGlobal(memory.memory, TRUE, &stream) == S_OK);
+                memory.memory = nullptr; // The native stream now owns it.
+            }
+            ATL::CComBSTR license;
+            CHECK(Split::ParseInitData(stream, &license.m_str) == S_OK);
+            CHECK(licensed ? license.m_str && ::SysStringLen(license) == 20 &&
+                !::wcscmp(license, L"OpenATL-test-license") : !license.m_str);
+            CHECK((stream.p == nullptr) == initNew);
+            if (stream) {
+                LARGE_INTEGER zero{}; ULARGE_INTEGER position{};
+                CHECK(stream->Seek(zero, STREAM_SEEK_CUR, &position) == S_OK &&
+                    position.QuadPart == (licensed ? 44 : 4));
+                BYTE persisted[5]{}; ULONG read = 0;
+                if (id != 625) {
+                    CHECK(stream->Read(persisted, id == 619 ? 5 : 4, &read) == S_OK &&
+                        read == (id == 619 ? 5U : 4U) && persisted[0] == (id == 614 && control == 712 ? 43 : 42));
+                    if (id == 619) CHECK(persisted[4] == 0xA5);
+                }
+            }
+        }
+        CHECK(!std::memcmp(init, snapshot.data(), size));
+        CHECK(!Split::FindCreateData(799, init, &payload) && !payload && ::GetLastError() == ERROR_SUCCESS);
+        CHECK(!Split::FindCreateData(711, init + 1, &payload) && !payload && ::GetLastError() == ERROR_INVALID_DATA);
+    }
+    for (WORD id : {WORD(616), WORD(617), WORD(618), WORD(631), WORD(637)}) {
+        const HRSRC resource = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(240));
+        CHECK(resource);
+        const auto init = static_cast<const BYTE*>(::LockResource(::LoadResource(instance, resource)));
+        const DWORD expected = id == 616 || id == 618 ? ERROR_INVALID_DATA : ERROR_NOT_SUPPORTED;
+        CHECK(!Split::FindCreateData(711, init, &payload) && !payload && ::GetLastError() == expected);
+    }
+    const auto makeStream = [](const BYTE* data, size_t count, ATL::CComPtr<IStream>& stream)->bool {
+        CHECK(::CreateStreamOnHGlobal(nullptr, TRUE, &stream) == S_OK);
+        ULONG written = 0;
+        CHECK(!count || (stream->Write(data, static_cast<ULONG>(count), &written) == S_OK && written == count));
+        ULARGE_INTEGER exact{}; exact.QuadPart = count;
+        LARGE_INTEGER zero{};
+        CHECK(stream->SetSize(exact) == S_OK && stream->Seek(zero, STREAM_SEEK_SET, nullptr) == S_OK);
+        return true;
+    };
+    const DWORD characters = 3;
+    const WCHAR text[] = {L'A', 0, L'B'};
+    std::vector<BYTE> record(sizeof(characters) + sizeof(text) + 1, 0);
+    std::memcpy(record.data(), &characters, sizeof(characters));
+    std::memcpy(record.data() + sizeof(characters), text, sizeof(text)); record.back() = 0xFE;
+    ATL::CComPtr<IStream> stream;
+    CHECK(makeStream(record.data(), record.size(), stream));
+    for (unsigned at = 1; at <= 2; ++at) for (HRESULT injected : {S_OK, S_FALSE, E_ACCESSDENIED}) {
+        LARGE_INTEGER zero{};
+        CHECK(stream->Seek(zero, STREAM_SEEK_SET, nullptr) == S_OK);
+        StreamTransferFault fault(stream, at, injected);
+        ATL::CComBSTR license;
+        CHECK(Split::ParseInitData(&fault, &license.m_str) == (FAILED(injected) ? injected : STG_E_READFAULT) &&
+            !license.m_str && fault.calls == at);
+    }
+    for (bool seek : {false, true}) for (HRESULT injected : {S_FALSE, E_ACCESSDENIED}) {
+        StreamTransferFault fault(stream, 99, S_OK);
+        (seek ? fault.seekResult : fault.statResult) = injected;
+        ATL::CComBSTR license;
+        CHECK(Split::ParseInitData(&fault, &license.m_str) == (FAILED(injected) ? injected : E_UNEXPECTED) &&
+            !license.m_str && !fault.calls);
+    }
+    for (size_t cut = 0; cut < sizeof(characters) + sizeof(text); ++cut) {
+        ATL::CComPtr<IStream> truncated;
+        CHECK(makeStream(record.data(), cut, truncated));
+        ATL::CComBSTR license;
+        CHECK(Split::ParseInitData(truncated, &license.m_str) == STG_E_READFAULT && !license.m_str);
+    }
+    const DWORD oversized = MAXDWORD;
+    ATL::CComPtr<IStream> bad;
+    CHECK(makeStream(reinterpret_cast<const BYTE*>(&oversized), sizeof(oversized), bad));
+    ATL::CComBSTR license;
+    CHECK(Split::ParseInitData(bad, &license.m_str) == STG_E_READFAULT && !license.m_str);
+    CHECK(Split::ParseInitData(nullptr, nullptr) == E_POINTER && Split::ParseInitData(nullptr, &license.m_str) == S_OK);
+    const DWORD noLicense = 0;
+    ATL::CComPtr<IStream> empty;
+    CHECK(makeStream(reinterpret_cast<const BYTE*>(&noLicense), sizeof(noLicense), empty));
+    BYTE unused = 0; ULONG emptyRead = 0;
+    // Native HGlobal reports EOF as S_OK with zero bytes read.
+    CHECK(Split::ParseInitData(empty, &license.m_str) == S_OK && !license.m_str && empty &&
+        empty->Read(&unused, 1, &emptyRead) == S_OK && !emptyRead);
+    // The key starts at the current stream position, with opaque trailing data.
+    record.insert(record.begin(), 5, 0xAB);
+    stream.Release(); CHECK(makeStream(record.data(), record.size(), stream));
+    LARGE_INTEGER prefix{}; prefix.QuadPart = 5;
+    CHECK(stream->Seek(prefix, STREAM_SEEK_SET, nullptr) == S_OK && Split::ParseInitData(stream, &license.m_str) == S_OK &&
+        ::SysStringLen(license) == 3 && !std::memcmp(license.m_str, text, sizeof(text)));
+    BYTE trailing = 0; ULONG read = 0;
+    CHECK(stream->Read(&trailing, 1, &read) == S_OK && read == 1 && trailing == 0xFE);
+    return true;
+}
 bool splitDialogResources() {
     namespace Split = ATL::_DialogSplitHelper;
     const HINSTANCE instance = ATL::_AtlBaseModule.GetResourceInstance();
@@ -1880,7 +2002,7 @@ int main(int argc, char** argv) {
     ULONG_PTR token = 0;
     if (::CoGetContextToken(&token) != CO_E_NOTINITIALIZED || !ATL::AtlAxWinInit() ||
         ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
-    if (!propertyMaps() || !propertyBrowsing() || !persistentProperties() || !authoredPropertyPages() || !propertyPageMetrics() || !splitDialogResources() || !dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
+    if (!propertyMaps() || !propertyBrowsing() || !persistentProperties() || !authoredPropertyPages() || !propertyPageMetrics() || !dialogInitStreams() || !splitDialogResources() || !dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
     HRESULT hr = ::OleInitialize(nullptr); if (FAILED(hr)) return 1;
     bool ok = true;
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)

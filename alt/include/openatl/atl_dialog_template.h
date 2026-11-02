@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <utility>
 #include <string>
+#include <limits>
 
 namespace ATL { namespace detail {
 struct AxDialogInit {
@@ -19,6 +20,8 @@ struct AxDialogInit {
     Kind kind = Kind::Stream;
     std::wstring name, license;
     std::vector<BYTE> stream;
+    size_t payloadOffset = 0;
+    DWORD payloadSize = 0;
     bool IsString() const noexcept { return kind == Kind::ListString || kind == Kind::ComboString; }
 };
 struct AxDialogTemplate {
@@ -124,12 +127,18 @@ public:
             ERROR_NOT_SUPPORTED : ERROR_SUCCESS;
     }
 };
-enum class AxDialogTemplateMode { HostControls, SplitControls };
-inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTemplate& output,
-    const void* initData = nullptr, size_t initSize = 0,
-    AxDialogTemplateMode mode = AxDialogTemplateMode::HostControls) noexcept {
-    output = {};
-    if (!data) return ERROR_INVALID_DATA;
+inline bool AxDialogLicenseByteCount(DWORD characters, ULONGLONG available, ULONG& bytes) noexcept {
+    bytes = 0;
+    const ULONGLONG required = static_cast<ULONGLONG>(characters) * sizeof(WCHAR);
+    if (required > available || required > (std::numeric_limits<ULONG>::max)()) return false;
+    bytes = static_cast<ULONG>(required); return true;
+}
+inline DWORD ReadAxDialogInit(const void* initData, size_t initSize, std::vector<AxDialogInit>& output) noexcept {
+    struct ClearFailure {
+        std::vector<AxDialogInit>& output;
+        bool committed = false;
+        ~ClearFailure() { if (!committed) output.clear(); }
+    } finish{output};
     try {
         std::vector<AxDialogInit> initialization;
         if (initData || initSize) {
@@ -147,6 +156,7 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
                 if (!init.Read(message) || !init.Read(length) || length > init.size - init.position) return ERROR_INVALID_DATA;
                 if (message != 0x0376 && message != 0x0377 && message != 0x0378 && message != 0x0401 && message != 0x0403) return ERROR_NOT_SUPPORTED;
                 AxDialogInit record; record.id = id;
+                record.payloadOffset = init.position; record.payloadSize = length;
                 if (message == 0x0401) record.kind = AxDialogInit::Kind::ListString;
                 else if (message == 0x0403) record.kind = AxDialogInit::Kind::ComboString;
                 for (const auto& previous : initialization) if (previous.id == id &&
@@ -165,16 +175,34 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
                 } else {
                     if (message == 0x0377) record.kind = AxDialogInit::Kind::Storage;
                     DialogTemplateReader payload(init.bytes + init.position, length);
-                    if (!payload.Read(characters) || characters > (payload.size - payload.position) / sizeof(WCHAR)) return ERROR_INVALID_DATA;
+                    ULONG licenseBytes = 0;
+                    if (!payload.Read(characters) || !AxDialogLicenseByteCount(characters,
+                        payload.size - payload.position, licenseBytes)) return ERROR_INVALID_DATA;
                     record.license.resize(characters);
                     if (characters) std::memcpy(&record.license[0], payload.bytes + payload.position, characters * sizeof(WCHAR));
-                    payload.position += characters * sizeof(WCHAR);
+                    payload.position += licenseBytes;
                     record.stream.assign(payload.bytes + payload.position, payload.bytes + payload.size);
                 }
                 initialization.push_back(std::move(record));
                 init.position += length;
             }
         }
+        output = std::move(initialization); finish.committed = true;
+        return ERROR_SUCCESS;
+    } catch (const std::bad_alloc&) { return ERROR_NOT_ENOUGH_MEMORY; }
+      catch (const std::length_error&) { return ERROR_NOT_ENOUGH_MEMORY; }
+      catch (...) { return ERROR_INVALID_DATA; }
+}
+enum class AxDialogTemplateMode { HostControls, SplitControls };
+inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTemplate& output,
+    const void* initData = nullptr, size_t initSize = 0,
+    AxDialogTemplateMode mode = AxDialogTemplateMode::HostControls) noexcept {
+    output = {};
+    if (!data) return ERROR_INVALID_DATA;
+    try {
+        std::vector<AxDialogInit> initialization;
+        const DWORD initError = ReadAxDialogInit(initData, initSize, initialization);
+        if (initError) return initError;
         std::vector<bool> matched(initialization.size(), false);
         std::vector<AxDialogInit> orderedInitialization;
         DialogTemplateCursor cursor(data, size);

@@ -121,6 +121,56 @@ inline BOOL IsActiveXControl(const DLGITEMTEMPLATE* item, BOOL extended) noexcep
     ::SetLastError(error);
     return !error && view.selected.activeX ? TRUE : FALSE;
 }
+inline DWORD FindCreateData(DWORD id, const BYTE* initData, BYTE** output) noexcept {
+    if (!output) { ::SetLastError(ERROR_INVALID_PARAMETER); return 0; }
+    *output = nullptr;
+    if (!initData) { ::SetLastError(ERROR_SUCCESS); return 0; }
+    detail::DialogResourceSpan resource;
+    DWORD error = detail::FindDialogResourceSpan(initData, 240, resource);
+    if (!error && initData != resource.bytes) error = ERROR_INVALID_DATA;
+    std::vector<detail::AxDialogInit> records;
+    if (!error) error = detail::ReadAxDialogInit(resource.bytes, resource.size, records);
+    if (!error) for (const auto& record : records)
+        if (record.kind == detail::AxDialogInit::Kind::Storage) { error = ERROR_NOT_SUPPORTED; break; }
+    if (error) { ::SetLastError(error); return 0; }
+    for (const auto& record : records) if (record.id == id) {
+        if (record.IsString()) { ::SetLastError(ERROR_NOT_SUPPORTED); return 0; }
+        if (record.payloadSize) *output = const_cast<BYTE*>(resource.bytes + record.payloadOffset);
+        ::SetLastError(ERROR_SUCCESS); return record.payloadSize;
+    }
+    ::SetLastError(ERROR_SUCCESS); return 0;
+}
+// Output-only BSTR: the caller supplies empty storage and owns the result.
+// WTL supplies a native seekable HGlobal stream. Stat bounds the counted key;
+// the original resource envelope is independently checked before this call.
+inline HRESULT ParseInitData(IStream* stream, BSTR* license) noexcept {
+    if (!license) return E_POINTER;
+    *license = nullptr;
+    if (!stream) return S_OK;
+    LARGE_INTEGER zero{}; ULARGE_INTEGER position{}; STATSTG stat{};
+    HRESULT hr = stream->Seek(zero, STREAM_SEEK_CUR, &position);
+    if (hr != S_OK) return FAILED(hr) ? hr : E_UNEXPECTED;
+    hr = stream->Stat(&stat, STATFLAG_NONAME);
+    if (hr != S_OK) return FAILED(hr) ? hr : E_UNEXPECTED;
+    if (position.QuadPart > stat.cbSize.QuadPart ||
+        stat.cbSize.QuadPart - position.QuadPart < sizeof(DWORD)) return STG_E_READFAULT;
+    DWORD characters = 0; ULONG transferred = 0;
+    hr = stream->Read(&characters, sizeof(characters), &transferred);
+    if (FAILED(hr)) return hr;
+    if (transferred != sizeof(characters)) return STG_E_READFAULT;
+    ULONG bytes = 0;
+    if (!detail::AxDialogLicenseByteCount(characters,
+        stat.cbSize.QuadPart - position.QuadPart - sizeof(DWORD), bytes)) return STG_E_READFAULT;
+    if (!characters) return S_OK; // Zero characters means no license key.
+    CComBSTR staged;
+    staged.m_str = ::SysAllocStringLen(nullptr, characters);
+    if (!staged.m_str) return E_OUTOFMEMORY;
+    transferred = 0;
+    hr = stream->Read(staged.m_str, bytes, &transferred);
+    if (FAILED(hr)) return hr;
+    if (transferred != bytes) return STG_E_READFAULT;
+    *license = staged.Detach(); return S_OK;
+}
 inline const DLGTEMPLATE* SplitDialogTemplate(const DLGTEMPLATE* dialog, const BYTE* initData = nullptr) noexcept {
     detail::DialogResourceSpan resource, initialization;
     DWORD error = detail::FindDialogResourceSpan(dialog, 5, resource);

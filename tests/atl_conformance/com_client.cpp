@@ -18,6 +18,7 @@
 #include <utility>
 #include <type_traits>
 #include <atlcomcli.h>
+#include "../stream_transfer_fault.h"
 
 // WeaselTSF includes atlcomcli.h directly before declaring this alias.
 // Keep this check before atlbase.h can supply its own namespace import.
@@ -47,39 +48,6 @@ static bool no_apartment() {
     ULONG_PTR context=0;
     return ::CoGetContextToken(&context)==CO_E_NOTINITIALIZED;
 }
-
-// Delegates storage to Windows while injecting one short or failed transfer.
-struct StreamTransferFault final : IStream {
-    IStream* inner;
-    unsigned calls = 0, failAt;
-    HRESULT result;
-    StreamTransferFault(IStream* s, unsigned at, HRESULT hr)
-        : inner(s), failAt(at), result(hr) {}
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** out) override {
-        if (!out) return E_POINTER;
-        *out = nullptr; return E_NOINTERFACE;
-    }
-    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
-    ULONG STDMETHODCALLTYPE Release() override { return 1; }
-    HRESULT STDMETHODCALLTYPE Read(void* p, ULONG n, ULONG* done) override {
-        if (++calls == failAt) { if (done) *done = 0; return result; }
-        return inner->Read(p,n,done);
-    }
-    HRESULT STDMETHODCALLTYPE Write(const void* p, ULONG n, ULONG* done) override {
-        if (++calls == failAt) { if (done) *done = 0; return result; }
-        return inner->Write(p,n,done);
-    }
-    HRESULT STDMETHODCALLTYPE Seek(LARGE_INTEGER p,DWORD o,ULARGE_INTEGER* n) override { return inner->Seek(p,o,n); }
-    HRESULT STDMETHODCALLTYPE SetSize(ULARGE_INTEGER n) override { return inner->SetSize(n); }
-    HRESULT STDMETHODCALLTYPE CopyTo(IStream*,ULARGE_INTEGER,ULARGE_INTEGER*,ULARGE_INTEGER*) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE Commit(DWORD) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE Revert() override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE LockRegion(ULARGE_INTEGER,ULARGE_INTEGER,DWORD) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE UnlockRegion(ULARGE_INTEGER,ULARGE_INTEGER,DWORD) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE Stat(STATSTG* s,DWORD f) override { return inner->Stat(s,f); }
-    HRESULT STDMETHODCALLTYPE Clone(IStream**) override { return E_NOTIMPL; }
-};
-
 
 // In-process test double only: never registered, activated or published.
 // It rejects QueryInterface to check failed COM identity claims.
