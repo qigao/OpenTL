@@ -2138,12 +2138,39 @@ public:
             pThis->OnDialogCreateFailure(hWnd, error);
             return FALSE;
         }
-        return pProc(hWnd, uMsg, wParam, lParam);
+        // WTL's original CAxPropertyPageImpl enters CreateActiveXControls
+        // *before* it forwards WM_INITDIALOG to this base DialogProc. A COM
+        // Load callback can synchronously destroy the entire sheet there.
+        // Keep the initial thunk frame alive so nested WM_NCDESTROY cannot
+        // run OnFinalMessage (which may release the executable thunk or
+        // delete the owner) while pProc is still on the stack.
+        _ATL_MSG initial(pThis->m_hWnd, uMsg, wParam, lParam);
+        const _ATL_MSG* old = pThis->m_pCurrentMsg;
+        pThis->m_pCurrentMsg = &initial;
+        const INT_PTR result = pProc(hWnd, uMsg, wParam, lParam);
+        ATLASSERT(pThis->m_pCurrentMsg == &initial);
+        pThis->m_pCurrentMsg = old;
+        if ((pThis->m_dwState & CWindowImplRoot<TBase>::WINSTATE_DESTROYED) &&
+            pThis->m_pCurrentMsg == NULL) {
+            const HWND finalWindow = pThis->m_hWnd;
+            pThis->m_hWnd = NULL;
+            pThis->m_dwState &= ~CWindowImplRoot<TBase>::WINSTATE_DESTROYED;
+            pThis->OnFinalMessage(finalWindow);
+            // The callback may destroy the C++ object; do not access it.
+        }
+        return result;
     }
 
     static INT_PTR CALLBACK DialogProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         CDialogImplBaseT<TBase>* pThis = (CDialogImplBaseT<TBase>*)hWnd;
+        // A custom WTL DialogProc can invoke this base *after* nested COM
+        // callbacks already retired the underlying native dialog. Never
+        // re-enter an application's WM_INITDIALOG on a destroyed HWND.
+        if (uMsg == WM_INITDIALOG &&
+            ((pThis->m_dwState & CWindowImplRoot<TBase>::WINSTATE_DESTROYED) ||
+             !pThis->m_hWnd || !::IsWindow(pThis->m_hWnd)))
+            return FALSE;
         _ATL_MSG msg(pThis->m_hWnd, uMsg, wParam, lParam);
         const _ATL_MSG* pOldMsg = pThis->m_pCurrentMsg;
         pThis->m_pCurrentMsg = &msg;
