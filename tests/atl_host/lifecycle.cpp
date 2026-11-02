@@ -1322,11 +1322,18 @@ public:
                 "WTL.DLGPROC.WM_DESTROY.return" : "WTL.DLGPROC.WM_NCDESTROY.return", self->m_hWnd);
         return result;
     }
+    int pageCallbackCreates = 0, pageCallbackAddRefs = 0, pageCallbackReleases = 0;
     bool OnPageCreate() {
+        ++pageCallbackCreates;
         if (traceState) TraceWizardReentry(*traceState, "WTL.PropPageCallback.create");
         return true;
     }
+    void OnPageAddRef() {
+        ++pageCallbackAddRefs;
+        if (traceState) TraceWizardReentry(*traceState, "WTL.PropPageCallback.addref");
+    }
     void OnPageRelease() {
+        ++pageCallbackReleases;
         if (traceState) TraceWizardReentry(*traceState, "WTL.PropPageCallback.release");
     }
     void OnFinalMessage(HWND window) override {
@@ -1700,6 +1707,12 @@ bool originalWtlWizardCancelDuringLoad(ControlState& state,
     TraceWizardReentry(state, "PropertySheet.Create.enter");
     const HWND created = wizard.Create(nullptr);
     TraceWizardReentry(state, "PropertySheet.Create.return", created);
+    if (state.destroyWizardDuringLoad) {
+        std::fprintf(stderr, "WTL_NATIVE_PAGE_COUNTS create=%d addref=%d release=%d\n",
+                     page.pageCallbackCreates, page.pageCallbackAddRefs,
+                     page.pageCallbackReleases);
+        std::fflush(stderr);
+    }
     const bool returnedLive = created && ::IsWindow(created);
     // If Windows returned a live sheet after synchronous cancellation,
     // it must be retired before destroying the C++ page owner.
