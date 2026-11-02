@@ -430,6 +430,13 @@ and the native type-mismatch argument index are checked independently. This
 qualifies typed MIDL defaults; untyped optional VARIANTs and broader LCID
 conversion remain separate work.
 
+The same generated dual interface has an `[in, out] LONG*` method. Its native
+test supplies `VT_BYREF | VT_I4` through `DISPPARAMS`, observes both mutation
+of the caller's storage and the independent retval, and checks native
+type-mismatch indexing for an incompatible BYREF value. This qualifies typed
+scalar BYREF dispatch; nested VARIANT, array, record and interface-reference
+forms remain separate compatibility boundaries.
+
 **This is partial ATL Automation compatibility.** There is no successful
 registered/installed TypeLib native acceptance yet; the standard holder
 does not cache type-info across apartment/module lifetime boundaries.

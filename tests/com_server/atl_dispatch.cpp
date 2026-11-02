@@ -81,6 +81,12 @@ public:
         *result = requiredValue * 10 + optionalValue;
         return S_OK;
     }
+    HRESULT STDMETHODCALLTYPE Adjust(LONG* value, LONG* result) override {
+        if (!value || !result) return E_POINTER;
+        *value += 5;
+        *result = *value * 2;
+        return S_OK;
+    }
 };
 struct Apartment {
     HRESULT status = ::CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
@@ -253,6 +259,59 @@ bool TestOptionalDefaultArguments() {
     DISPATCH_CHECK(raw->Release() == 0);
     return true;
 }
+bool TestByReferenceArguments() {
+    ATL::CComObject<OptionalDual>* raw = nullptr;
+    DISPATCH_CHECK(ATL::CComObject<OptionalDual>::CreateInstance(&raw) == S_OK && raw);
+    DISPATCH_CHECK(raw->AddRef() == 1);
+    ATL::CComPtr<IOpenATLInvokeFixture> typed;
+    ATL::CComPtr<IDispatch> dispatch;
+    DISPATCH_CHECK(raw->QueryInterface(IID_IOpenATLInvokeFixture,
+        reinterpret_cast<void**>(&typed.p)) == S_OK && typed.p);
+    DISPATCH_CHECK(raw->QueryInterface(IID_IDispatch,
+        reinterpret_cast<void**>(&dispatch.p)) == S_OK && dispatch.p);
+
+    LONG directValue = 2;
+    LONG directResult = 0;
+    DISPATCH_CHECK(typed->Adjust(&directValue, &directResult) == S_OK &&
+        directValue == 7 && directResult == 14);
+
+    LPOLESTR names[] = {const_cast<LPOLESTR>(L"Adjust"),
+        const_cast<LPOLESTR>(L"value")};
+    DISPID ids[] = {DISPID_UNKNOWN, DISPID_UNKNOWN};
+    DISPATCH_CHECK(dispatch->GetIDsOfNames(IID_NULL, names, 2,
+        LOCALE_SYSTEM_DEFAULT, ids) == S_OK && ids[0] == 302 &&
+        ids[1] != DISPID_UNKNOWN);
+
+    LONG value = 11;
+    ATL::CComVariant byReference;
+    byReference.vt = VT_I4 | VT_BYREF;
+    byReference.plVal = &value;
+    DISPPARAMS values{&byReference, nullptr, 1, 0};
+    ATL::CComVariant result;
+    DISPATCH_CHECK(dispatch->Invoke(ids[0], IID_NULL, LOCALE_SYSTEM_DEFAULT,
+        DISPATCH_METHOD, &values, &result, nullptr, nullptr) == S_OK &&
+        value == 16 && result.vt == VT_I4 && result.lVal == 32);
+
+    BSTR wrongText = ::SysAllocString(L"not-a-number");
+    DISPATCH_CHECK(wrongText != nullptr);
+    ATL::CComVariant wrongReference;
+    wrongReference.vt = VT_BSTR | VT_BYREF;
+    wrongReference.pbstrVal = &wrongText;
+    DISPPARAMS wrongValues{&wrongReference, nullptr, 1, 0};
+    UINT wrongArgument = 99;
+    const HRESULT wrongStatus = dispatch->Invoke(ids[0], IID_NULL,
+        LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD, &wrongValues, nullptr, nullptr,
+        &wrongArgument);
+    ::SysFreeString(wrongText);
+    DISPATCH_CHECK(wrongStatus == DISP_E_TYPEMISMATCH && wrongArgument == 0);
+
+    DISPPARAMS empty{};
+    DISPATCH_CHECK(dispatch->Invoke(ids[0], IID_NULL, LOCALE_SYSTEM_DEFAULT,
+        DISPATCH_METHOD, &empty, nullptr, nullptr, nullptr) == DISP_E_BADPARAMCOUNT);
+    dispatch.Release(); typed.Release();
+    DISPATCH_CHECK(raw->Release() == 0);
+    return true;
+}
 } // namespace
 
 bool RunAtlDispatchTests() {
@@ -263,6 +322,7 @@ bool RunAtlDispatchTests() {
         DISPATCH_CHECK(scope.status == S_OK);
         DISPATCH_CHECK(TestRealOleTypeInfo());
         DISPATCH_CHECK(TestOptionalDefaultArguments());
+        DISPATCH_CHECK(TestByReferenceArguments());
         DISPATCH_CHECK(TestMissingTypeLibrary());
         DISPATCH_CHECK(RunAtlFileTypeLibTests());
     }

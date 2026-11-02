@@ -21,6 +21,9 @@ library OpenATLEventLib
             [in] LONG requiredValue,
             [in, defaultvalue(7)] LONG optionalValue,
             [out, retval] LONG* result);
+        [id(302)] HRESULT Adjust(
+            [in, out] LONG* value,
+            [out, retval] LONG* result);
     };
     [uuid(D7022AF2-51CE-49AF-9872-1140D1824961)]
     dispinterface _IOpenATLDispatchEvents
