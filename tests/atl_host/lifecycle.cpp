@@ -1246,6 +1246,22 @@ public:
         SINK_ENTRY_INFO(711, OriginalWtlPageEventIID, 1, OnNativeEvent, &eventSignature)
     END_SINK_MAP()
     int initialized = 0, destroyed = 0, createCalls = 0;
+    int nativeFocusQueries = 0, nativeAccelCalls = 0;
+    HWND nativeFocusTarget = nullptr, nativeAccelSource = nullptr;
+    WPARAM nativeAccelKey = 0;
+    HWND OnQueryInitialFocus(HWND) {
+        ++nativeFocusQueries;
+        nativeFocusTarget = ::GetDlgItem(m_hWnd, 715);
+        return nativeFocusTarget;
+    }
+    int OnTranslateAccelerator(LPMSG message) {
+        if (!message || message->message != WM_KEYDOWN ||
+            message->wParam != VK_F6) return PSNRET_NOERROR;
+        ++nativeAccelCalls;
+        nativeAccelSource = message->hwnd;
+        nativeAccelKey = message->wParam;
+        return PSNRET_MESSAGEHANDLED;
+    }
     int wizardNext = 0;
     bool vetoWizardNext = false;
     int OnWizardNext() { ++wizardNext; return vetoWizardNext ? -1 : 0; }
@@ -1524,6 +1540,25 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
     REQUIRE(state.activeEventControl && state.eventAdvises == 1 &&
             state.activeEventControl->FireWizardEvent(41) == S_OK &&
             ax.eventsReceived == 1 && ax.lastEventValue == 41);
+    // The native dialog's initial-focus notification must select the actual
+    // ListBox HWND on the original ActiveX page, not a synthetic focus owner.
+    const HWND focusControl = ::GetDlgItem(ax.m_hWnd, 715);
+    REQUIRE(focusControl && ::IsWindow(focusControl) &&
+            ax.nativeFocusQueries > 0 &&
+            ax.nativeFocusTarget == focusControl);
+    REQUIRE(::SetFocus(focusControl) != nullptr ||
+            ::GetFocus() == focusControl);
+    REQUIRE(::GetFocus() == focusControl);
+    // Only a genuine posted keyboard message, dispatched through
+    // PropSheet_IsDialogMessage, may reach PSN_TRANSLATEACCELERATOR.
+    REQUIRE(::PostMessageW(focusControl, WM_KEYDOWN, VK_F6, 1));
+    REQUIRE(NativeWizardDispatchPending(sheet));
+    REQUIRE(ax.nativeAccelCalls == 1 &&
+            ax.nativeAccelSource == focusControl &&
+            ax.nativeAccelKey == VK_F6 &&
+            state.activeEventControl &&
+            state.activeEventControl->FireWizardEvent(46) == S_OK &&
+            ax.eventsReceived == 2 && ax.lastEventValue == 46);
     // A real Next press must honor the original WTL page's negative return:
     // no page switch, no COM reinitialization, no early close.
     ax.vetoWizardNext = true;
@@ -1535,7 +1570,7 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
             ax.createCalls == 1 && state.activated == 1 && !state.closed &&
             state.activeEventControl &&
             state.activeEventControl->FireWizardEvent(42) == S_OK &&
-            ax.eventsReceived == 2 && ax.lastEventValue == 42);
+            ax.eventsReceived == 3 && ax.lastEventValue == 42);
     ax.vetoWizardNext = false;
     ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_NEXT, 0);
     REQUIRE(NativeWizardSelected(sheet, ordinary.m_hWnd));
@@ -1544,7 +1579,7 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
             ax.m_hWnd && ::IsWindow(ax.m_hWnd) &&
             state.activeEventControl &&
             state.activeEventControl->FireWizardEvent(43) == S_OK &&
-            ax.eventsReceived == 3 && ax.lastEventValue == 43);
+            ax.eventsReceived == 4 && ax.lastEventValue == 43);
     // Back veto must also be respected by the native sheet.
     ordinary.vetoWizardBack = true;
     ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_BACK, 0);
@@ -1555,7 +1590,7 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
             state.activated == 1 && !state.closed &&
             state.activeEventControl &&
             state.activeEventControl->FireWizardEvent(44) == S_OK &&
-            ax.eventsReceived == 4 && ax.lastEventValue == 44);
+            ax.eventsReceived == 5 && ax.lastEventValue == 44);
     ordinary.vetoWizardBack = false;
     ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_BACK, 0);
     REQUIRE(NativeWizardSelected(sheet, ax.m_hWnd));
@@ -1564,7 +1599,7 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
             state.activated == 1 && state.loaded == 1 && !state.closed &&
             state.activeEventControl &&
             state.activeEventControl->FireWizardEvent(45) == S_OK &&
-            ax.eventsReceived == 5 && ax.lastEventValue == 45);
+            ax.eventsReceived == 6 && ax.lastEventValue == 45);
     REQUIRE(::DestroyWindow(sheet));
     REQUIRE(!ax.m_hWnd && !ordinary.m_hWnd &&
             ax.destroyed == 1 && state.closed == 1 &&
