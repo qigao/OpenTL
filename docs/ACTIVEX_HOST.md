@@ -185,3 +185,8 @@ Rejected property pages can leave an unconsumed WTL dialog-creation record.
 The ATL dialog owner unlinks its pending record on destruction before releasing
 its thunk storage, so a later unrelated dialog cannot traverse a dead page's
 creation record.
+
+The lifecycle fixture is quiet on success. For manual debugger or heap
+diagnostics, set `OPENATL_TRACE_WIZARD_TEARDOWN=1` to enable the detailed
+teardown phases, native callback counters and heap checkpoints. The native
+ARM64 acceptance harness continues to require empty stderr by default.

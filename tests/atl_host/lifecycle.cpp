@@ -314,6 +314,7 @@ struct ControlState {
     bool storageInterface = true, storageReadOnly = true, rejectLicense = false, destroyDuringStorageQuery = false;
     bool discoverWindow = false, destroyDialogDuringInit = false, sendInitDuringLoad = false;
     bool destroyWizardDuringLoad = false;
+    bool traceWizardTeardown = false;
     unsigned wizardTraceSequence = 0;
     int wizardCancelRequests = 0;
     bool wizardCancelSucceeded = false;
@@ -325,7 +326,7 @@ struct ControlState {
     PropertyState* properties = nullptr;
 };
 void TraceWizardReentry(ControlState& state, const char* phase, HWND other = nullptr) noexcept {
-    if (!state.destroyWizardDuringLoad) return;
+    if (!state.destroyWizardDuringLoad || !state.traceWizardTeardown) return;
     std::fprintf(stderr,
         "WTL_REENTRANT_PHASE seq=%u phase=%s host=%p other=%p"
         " loaded=%d activated=%d closed=%d detached=%d destroyed=%d\n",
@@ -338,7 +339,7 @@ void TraceWizardReentry(ControlState& state, const char* phase, HWND other = nul
 // teardown checkpoints. A passing HeapValidate is not proof that a later
 // invalid free or use-after-free cannot occur; no production behavior changes.
 void TraceWizardHeaps(ControlState& state, const char* phase) noexcept {
-    if (!state.destroyWizardDuringLoad) return;
+    if (!state.destroyWizardDuringLoad || !state.traceWizardTeardown) return;
     HANDLE heaps[64]{};
     const DWORD total = ::GetProcessHeaps(64, heaps);
     DWORD inspected = 0, invalid = 0;
@@ -1824,6 +1825,10 @@ bool originalWtlWizardCancelDuringLoad(ControlState& state,
     state.discoverWindow = true;
     state.streamBytes = 8;
     state.destroyWizardDuringLoad = true;
+    WCHAR trace[2]{};
+    state.traceWizardTeardown =
+        ::GetEnvironmentVariableW(L"OPENATL_TRACE_WIZARD_TEARDOWN", trace, 2) == 1 &&
+        trace[0] == L'1';
     OriginalWtlAxPage page;
     page.expectedCreateFailure = true;
     page.traceState = &state;
@@ -1841,7 +1846,7 @@ bool originalWtlWizardCancelDuringLoad(ControlState& state,
     const HWND created = creation.Complete(native);
     const DWORD completionError = ::GetLastError();
     TraceWizardReentry(state, "PropertySheet.Create.return", created);
-    if (state.destroyWizardDuringLoad) {
+    if (state.traceWizardTeardown) {
         std::fprintf(stderr, "WTL_NATIVE_PAGE_COUNTS create=%d addref=%d release=%d\n",
                      page.pageCallbackCreates, page.pageCallbackAddRefs,
                      page.pageCallbackReleases);
