@@ -1796,13 +1796,28 @@ bool accelerators() {
 }
 }
 bool RunHostLifecycleTests() {
-    const bool created = creation();
-    const bool active = accelerators();
-    const bool resources = resourceInitialization();
-    const bool ui = uiHandlers();
-    const bool properties = propertyFrames();
-    const bool storage = storagePersistence();
-    return created && active && resources && ui && properties && storage;
+    // A failed native HWND/COM owner may still be in retirement. Never run
+    // unrelated scenarios against the same STA after an ownership failure:
+    // return the first failing scenario, not a compound final boolean.
+    const struct {
+        const char* name;
+        bool (*run)();
+    } cases[] = {
+        {"creation", creation},
+        {"accelerators", accelerators},
+        {"resourceInitialization", resourceInitialization},
+        {"uiHandlers", uiHandlers},
+        {"propertyFrames", propertyFrames},
+        {"storagePersistence", storagePersistence}
+    };
+    for (const auto& scenario : cases) {
+        if (!scenario.run()) {
+            std::fprintf(stderr, "HOST_LIFECYCLE_SUITE_FAIL suite=%s\n",
+                         scenario.name);
+            return false;
+        }
+    }
+    return true;
 }
 bool RunBrowserUIHandlerTest(ATL::CAxWindow& window, IHTMLDocument2* document) {
     UIState state; state.browser = true;
