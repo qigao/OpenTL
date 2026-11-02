@@ -1289,6 +1289,78 @@ public:
         MESSAGE_HANDLER(WM_INITDIALOG, Init)
     END_MSG_MAP()
 };
+// A native sheet may remain alive when REQUIRE returns from its owner test.
+// Retire the HWND before the WTL C++ page/sheet owners unwind. This applies to
+// failed assertions too, not just successful calls to DestroyWindow().
+struct NativeSheetGuard {
+    HWND window;
+    explicit NativeSheetGuard(HWND value) noexcept : window(value) {}
+    NativeSheetGuard(const NativeSheetGuard&) = delete;
+    NativeSheetGuard& operator=(const NativeSheetGuard&) = delete;
+    ~NativeSheetGuard() noexcept {
+        if (window && ::IsWindow(window)) (void)::DestroyWindow(window);
+    }
+};
+// Verify native hook isolation, nested owners, repeated requests and removal.
+// Real HWND destruction also exercises the guard independently of COM loading.
+bool propertySheetCreationScopes() {
+    auto create = [] {
+        return ::CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 40, 40,
+            nullptr, nullptr, ATL::_AtlBaseModule.GetModuleInstance(), nullptr);
+    };
+    HWND outer = create(), inner = create(), unrelated = create();
+    NativeSheetGuard outerOwner{outer}, innerOwner{inner}, unrelatedOwner{unrelated};
+    REQUIRE(outer && inner && unrelated);
+    {
+        ATL::CPropertySheetCreationGuard first(outer);
+        REQUIRE(first.IsInstalled());
+        {
+            ATL::CPropertySheetCreationGuard second(inner);
+            REQUIRE(second.IsInstalled());
+            REQUIRE(::DestroyWindow(unrelated) && !::IsWindow(unrelated));
+            REQUIRE(!::DestroyWindow(inner) && ::IsWindow(inner));
+            REQUIRE(second.IsCancelled() && !first.IsCancelled());
+            REQUIRE(ATL::CPropertySheetCreationGuard::CancellationPending(inner));
+            REQUIRE(!ATL::CPropertySheetCreationGuard::CancellationPending(outer));
+            REQUIRE(!second.Complete(inner) && ::GetLastError() == ERROR_CANCELLED);
+            REQUIRE(!::IsWindow(inner) && !second.IsInstalled());
+        }
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        REQUIRE(first.Complete(outer) == outer && ::GetLastError() == ERROR_ACCESS_DENIED);
+        REQUIRE(!first.IsCancelled() && !first.IsInstalled());
+    }
+    // Nesting the same owner must defer its one retirement to the outer scope.
+    {
+        ATL::CPropertySheetCreationGuard first(outer);
+        REQUIRE(first.IsInstalled());
+        {
+            ATL::CPropertySheetCreationGuard second(outer);
+            REQUIRE(second.IsInstalled());
+            REQUIRE(!::DestroyWindow(outer) && !::DestroyWindow(outer));
+            REQUIRE(first.IsCancelled() && second.IsCancelled());
+            REQUIRE(!second.Complete(outer) && ::IsWindow(outer));
+        }
+        REQUIRE(!first.Complete(outer) && !::IsWindow(outer));
+        REQUIRE(!first.Complete(outer)); // No duplicate retirement.
+    }
+    REQUIRE(!ATL::CPropertySheetCreationGuard::CancellationPending(outer));
+    // Scope exit also removes an idle hook; later destruction proceeds normally.
+    outer = create();
+    REQUIRE(outer);
+    outerOwner.window = outer;
+    { ATL::CPropertySheetCreationGuard idle(outer); REQUIRE(idle.IsInstalled()); }
+    REQUIRE(::DestroyWindow(outer) && !::IsWindow(outer));
+    outer = create();
+    REQUIRE(outer);
+    outerOwner.window = outer;
+    {
+        ATL::CPropertySheetCreationGuard abandoned(outer);
+        REQUIRE(abandoned.IsInstalled());
+        REQUIRE(!::DestroyWindow(outer) && ::IsWindow(outer));
+    }
+    REQUIRE(!::IsWindow(outer)); // Early owner return still retires cancellation.
+    return true;
+}
 // Exercise original, unmodified WTL 10.0 CAxPropertyPageImpl through a real
 // modeless Windows property sheet, not the ATL CAxDialogImpl substitute.
 class OriginalWtlAxPage : public WTL::CAxPropertyPageImpl<OriginalWtlAxPage>,
@@ -1319,8 +1391,10 @@ public:
         nativeAccelKey = message->wParam;
         return PSNRET_MESSAGEHANDLED;
     }
-    int wizardNext = 0;
-    bool vetoWizardNext = false;
+    int wizardNext = 0, cancelQueries = 0, resetCalls = 0;
+    bool vetoWizardNext = false, vetoCancel = false;
+    BOOL OnQueryCancel() { ++cancelQueries; return vetoCancel ? TRUE : FALSE; }
+    void OnReset() { ++resetCalls; }
     int OnWizardNext() { ++wizardNext; return vetoWizardNext ? -1 : 0; }
     bool expectedCreateFailure = false;
     ControlState* traceState = nullptr;
@@ -1347,10 +1421,11 @@ public:
         return result;
     }
     int pageCallbackCreates = 0, pageCallbackAddRefs = 0, pageCallbackReleases = 0;
+    bool allowPageCreate = true;
     bool OnPageCreate() {
         ++pageCallbackCreates;
         if (traceState) TraceWizardReentry(*traceState, "WTL.PropPageCallback.create");
-        return true;
+        return allowPageCreate;
     }
     void OnPageAddRef() {
         ++pageCallbackAddRefs;
@@ -1427,7 +1502,11 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID re
     HPROPSHEETPAGE ordinaryHandle = ordinary.Create();
     REQUIRE(ordinaryHandle != nullptr && sheet.AddPage(ordinaryHandle));
     REQUIRE(sheet.GetPageCount() == 2);
-    HWND sheetWindow = sheet.Create(nullptr);
+    ATL::CPropertySheetCreationGuard creation(sheet.m_hWnd);
+    REQUIRE(creation.IsInstalled());
+    HWND sheetWindow = creation.Complete(sheet.Create(nullptr));
+    NativeSheetGuard owner{sheetWindow};
+    REQUIRE(!creation.IsCancelled() && !creation.IsInstalled());
     REQUIRE(sheetWindow && ::IsWindow(sheetWindow));
     // Modeless property sheets can defer page activation. Ask the native
     // sheet to select its first page; never manufacture the HWND or invoke
@@ -1497,6 +1576,28 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID re
             state.destroyed == 1 && module.GetLockCount() == 0);
     return true;
 }
+bool originalWtlRejectedPageCreation() {
+    OriginalWtlAxPage page;
+    page.allowPageCreate = false;
+    WTL::CPropertySheet sheet(L"Rejected native page");
+    const HPROPSHEETPAGE handle = page.Create();
+    REQUIRE(handle && sheet.AddPage(handle));
+    ATL::CPropertySheetCreationGuard creation(sheet.m_hWnd);
+    REQUIRE(creation.IsInstalled());
+    const HWND window = creation.Complete(sheet.Create(nullptr));
+    NativeSheetGuard owner{window};
+    REQUIRE(!creation.IsCancelled() && !creation.IsInstalled());
+    // Windows can return a live empty modeless sheet after PSPCB_CREATE
+    // rejects its only page. Preserve native behavior and retire that owner.
+    if (window && ::IsWindow(window)) {
+        REQUIRE(!::SendMessageW(window, PSM_GETCURRENTPAGEHWND, 0, 0));
+        REQUIRE(::DestroyWindow(window));
+    } else REQUIRE(!window || window == reinterpret_cast<HWND>(INT_PTR(-1)));
+    REQUIRE(!sheet.m_hWnd);
+    REQUIRE(page.pageCallbackCreates == 1 && page.pageCallbackAddRefs == 1 &&
+            page.pageCallbackReleases == 1 && !page.m_hWnd && !page.createCalls);
+    return true;
+}
 // A failing native IPersistStreamInit::Load must not reach application
 // WM_INITDIALOG or leave a live COM object/module lock behind. Use the same
 // registered factory and original WTL code path as the successful page.
@@ -1514,6 +1615,7 @@ bool originalWtlAxPageFailedInit(ControlState& state, ATL::CAtlModule& module,
     const HPROPSHEETPAGE handle = page.Create();
     REQUIRE(handle && sheet.AddPage(handle));
     const HWND window = sheet.Create(nullptr);
+    NativeSheetGuard owner{window};
     REQUIRE(window && ::IsWindow(window));
     // Drive Windows' own page activation; do not synthesize callbacks.
     REQUIRE(::SendMessageW(window, PSM_SETCURSEL, 0, 0));
@@ -1630,12 +1732,7 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
     REQUIRE(first && wizard.AddPage(first) && second && wizard.AddPage(second));
     const HWND sheet = wizard.Create(nullptr);
     REQUIRE(sheet && ::IsWindow(sheet));
-    // Ensure every failing assertion still retires the actual native sheet
-    // before the C++ page owners go out of scope.
-    struct SheetRetirement {
-        HWND hwnd;
-        ~SheetRetirement() { if (::IsWindow(hwnd)) ::DestroyWindow(hwnd); }
-    } retirement{sheet};
+    NativeSheetGuard owner{sheet};
     REQUIRE(::SendMessageW(sheet, PSM_SETCURSEL, 0, 0));
     REQUIRE(reinterpret_cast<HWND>(
                 ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0)) ==
@@ -1714,10 +1811,10 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
             state.destroyed == 1 && module.GetLockCount() == 0);
     return true;
 }
-// Native reentrant cancellation: the registered COM control closes the
-// entire real Wizard synchronously *inside* IPersistStreamInit::Load. This
-// exercises original WTL property sheet and page destruction while the
-// unmodified CreateActiveXControls() frame is still executing.
+// The COM control still calls native DestroyWindow synchronously inside Load.
+// The explicit owner guard rejects that in-flight destruction, aborts hosting,
+// and retires the native sheet only after PropertySheet returns. Allowing the
+// native free inside Load leaves comctl32!PageChange using freed sheet state.
 bool originalWtlWizardCancelDuringLoad(ControlState& state,
                                        ATL::CAtlModule& module,
                                        REFCLSID registeredId) {
@@ -1734,9 +1831,15 @@ bool originalWtlWizardCancelDuringLoad(ControlState& state,
     wizard.SetWizardMode();
     const HPROPSHEETPAGE handle = page.Create();
     REQUIRE(handle && wizard.AddPage(handle));
+    ATL::CPropertySheetCreationGuard creation(wizard.m_hWnd);
+    REQUIRE(creation.IsInstalled());
     TraceWizardReentry(state, "PropertySheet.Create.enter");
     TraceWizardHeaps(state, "PropertySheet.Create.enter");
-    const HWND created = wizard.Create(nullptr);
+    const HWND native = wizard.Create(nullptr);
+    const bool nativeLive = native && ::IsWindow(native);
+    const bool pending = creation.IsCancelled();
+    const HWND created = creation.Complete(native);
+    const DWORD completionError = ::GetLastError();
     TraceWizardReentry(state, "PropertySheet.Create.return", created);
     if (state.destroyWizardDuringLoad) {
         std::fprintf(stderr, "WTL_NATIVE_PAGE_COUNTS create=%d addref=%d release=%d\n",
@@ -1749,8 +1852,12 @@ bool originalWtlWizardCancelDuringLoad(ControlState& state,
     // it must be retired before destroying the C++ page owner.
     if (returnedLive) ::DestroyWindow(created);
     const bool valid = state.wizardCancelRequests == 1 &&
-        state.wizardCancelSucceeded && !returnedLive &&
-        page.createCalls == 1 && FAILED(page.createResult) &&
+        !state.wizardCancelSucceeded && pending && nativeLive && !created &&
+        completionError == ERROR_CANCELLED && !returnedLive &&
+        !::IsWindow(native) && !wizard.m_hWnd &&
+        page.createCalls == 1 && page.createResult == E_ABORT &&
+        page.pageCallbackCreates == 1 && page.pageCallbackAddRefs == 1 &&
+        page.pageCallbackReleases == 1 &&
         page.initialized == 0 && page.destroyed == 1 &&
         !page.m_hWnd && state.loaded == 1 &&
         state.activated == 0 && state.closed == 1 &&
@@ -1759,18 +1866,65 @@ bool originalWtlWizardCancelDuringLoad(ControlState& state,
     if (!valid) {
         std::fprintf(stderr,
             "WTL_WIZARD_REENTRANT_CANCEL_FAIL requests=%d cancel_ok=%d"
-            " returned=%p live=%d create_calls=%d create_hr=%08lx"
+            " returned=%p live=%d pending=%d native_live=%d error=%lu create_calls=%d create_hr=%08lx"
             " app_init=%d page_destroyed=%d page_hwnd=%p"
             " loaded=%d activated=%d closed=%d detached=%d"
             " control_destroyed=%d module_lock=%ld\n",
             state.wizardCancelRequests, state.wizardCancelSucceeded,
-            static_cast<void*>(created), returnedLive, page.createCalls,
+            static_cast<void*>(created), returnedLive, pending, nativeLive,
+            static_cast<unsigned long>(completionError), page.createCalls,
             static_cast<unsigned long>(page.createResult),
             page.initialized, page.destroyed, static_cast<void*>(page.m_hWnd),
             state.loaded, state.activated, state.closed, state.detached,
             state.destroyed, static_cast<long>(module.GetLockCount()));
     }
     REQUIRE(valid);
+    return true;
+}
+// Native user Cancel is not equivalent to a COM control forcibly calling
+// DestroyWindow on a sheet that is still being created. Exercise the real
+// PropertySheet PSBTN_CANCEL -> PSN_QUERYCANCEL/PSN_RESET contract separately.
+bool originalWtlWizardUserCancel(ControlState& state, ATL::CAtlModule& module,
+                                 REFCLSID registeredId) {
+    state = ControlState{};
+    state.classId = registeredId;
+    state.discoverWindow = true;
+    state.siteFirst = true;
+    state.streamBytes = 8;
+    OriginalWtlAxPage page;
+    WTL::CPropertySheet wizard(L"Original WTL native Cancel");
+    wizard.SetWizardMode();
+    const HPROPSHEETPAGE handle = page.Create();
+    REQUIRE(handle && wizard.AddPage(handle));
+    const HWND sheet = wizard.Create(nullptr);
+    NativeSheetGuard owner{sheet};
+    REQUIRE(sheet && ::IsWindow(sheet));
+    REQUIRE(::SendMessageW(sheet, PSM_SETCURSEL, 0, 0));
+    REQUIRE(reinterpret_cast<HWND>(
+                ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0)) ==
+                page.m_hWnd && page.initialized == 1 &&
+            page.createCalls == 1 && state.activated == 1 &&
+            state.loaded == 1 && !state.closed);
+    page.vetoCancel = true;
+    ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_CANCEL, 0);
+    REQUIRE(NativeWizardDispatchPending(sheet));
+    REQUIRE(::IsWindow(sheet) && page.m_hWnd &&
+            page.cancelQueries == 1 && page.resetCalls == 0 &&
+            state.activated == 1 && state.closed == 0);
+    page.vetoCancel = false;
+    ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_CANCEL, 0);
+    if (::IsWindow(sheet)) REQUIRE(NativeWizardDispatchPending(sheet));
+    // Modeless PropertySheet need not destroy the top-level window after
+    // native Cancel. Win32's completion signal is that no current page
+    // remains; the application then owns the final DestroyWindow(sheet).
+    const bool cancelled = !::IsWindow(sheet) ||
+        ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0) == 0;
+    REQUIRE(cancelled && page.cancelQueries == 2 && page.resetCalls == 1);
+    if (::IsWindow(sheet)) REQUIRE(::DestroyWindow(sheet));
+    REQUIRE(!::IsWindow(sheet) && !page.m_hWnd &&
+            page.destroyed == 1 && state.activated == 1 &&
+            state.closed == 1 && state.detached == 1 &&
+            state.destroyed == 1 && module.GetLockCount() == 0);
     return true;
 }
 bool resourceInitialization() {
@@ -1781,10 +1935,12 @@ bool resourceInitialization() {
     Registration registration;
     REQUIRE(::CoRegisterClassObject(classId, factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &registration.cookie) == S_OK);
     ATL::CAtlModule module;
+    REQUIRE(originalWtlRejectedPageCreation());
     REQUIRE(originalWtlAxPage(state, module, classId));
     REQUIRE(originalWtlAxPageFailedInit(state, module, classId));
     REQUIRE(originalWtlAxWizard(state, module, classId));
     REQUIRE(originalWtlWizardCancelDuringLoad(state, module, classId));
+    REQUIRE(originalWtlWizardUserCancel(state, module, classId));
     for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619), WORD(620), WORD(621), WORD(622), WORD(631), WORD(632), WORD(633), WORD(648)}) for (int mode = 0; mode < 5; ++mode) {
         state = ControlState{}; state.classId = classId; state.discoverWindow = true;
         state.siteFirst = mode != 1; state.initInterface = mode != 2;
@@ -1962,13 +2118,29 @@ bool accelerators() {
 }
 }
 bool RunHostLifecycleTests() {
-    const bool created = creation();
-    const bool active = accelerators();
-    const bool resources = resourceInitialization();
-    const bool ui = uiHandlers();
-    const bool properties = propertyFrames();
-    const bool storage = storagePersistence();
-    return created && active && resources && ui && properties && storage;
+    if (!propertySheetCreationScopes()) return false;
+    // A failed native HWND/COM owner may still be in retirement. Never run
+    // unrelated scenarios against the same STA after an ownership failure:
+    // return the first failing scenario, not a compound final boolean.
+    const struct {
+        const char* name;
+        bool (*run)();
+    } cases[] = {
+        {"creation", creation},
+        {"accelerators", accelerators},
+        {"resourceInitialization", resourceInitialization},
+        {"uiHandlers", uiHandlers},
+        {"propertyFrames", propertyFrames},
+        {"storagePersistence", storagePersistence}
+    };
+    for (const auto& scenario : cases) {
+        if (!scenario.run()) {
+            std::fprintf(stderr, "HOST_LIFECYCLE_SUITE_FAIL suite=%s\n",
+                         scenario.name);
+            return false;
+        }
+    }
+    return true;
 }
 bool RunBrowserUIHandlerTest(ATL::CAxWindow& window, IHTMLDocument2* document) {
     UIState state; state.browser = true;

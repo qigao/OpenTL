@@ -12,6 +12,7 @@
 #include <cstring>
 #include "openatl/atl_dialog_template.h"
 #include "openatl/atl_dialog_split.h"
+#include "openatl/atl_property_sheet_creation.h"
 
 namespace ATL {
 namespace detail {
@@ -568,9 +569,11 @@ public:
     }
 private:
     HRESULT FinishStep(IOleObject* expected, HRESULT hr) noexcept {
-        if (SUCCEEDED(hr) && SUCCEEDED(CheckWindow()) && control_.p == expected) return S_OK;
+        const bool cancelled = CPropertySheetCreationGuard::CancellationPending(window_);
+        if (SUCCEEDED(hr) && SUCCEEDED(CheckWindow()) && control_.p == expected &&
+            !cancelled) return S_OK;
         if (control_.p == expected) Close();
-        return FAILED(hr) ? hr : E_ABORT;
+        return cancelled ? E_ABORT : FAILED(hr) ? hr : E_ABORT;
     }
     ~AxHost() { Close(); }
     void Notify(DISPID member) noexcept {

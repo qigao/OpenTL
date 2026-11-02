@@ -8,6 +8,10 @@ foreach(mode IN ITEMS events browser lifecycle)
   add_test(NAME openatl.activex_${mode} COMMAND openatl_activex ${mode})
   set_tests_properties(openatl.activex_${mode} PROPERTIES TIMEOUT 25)
 endforeach()
+# The lifecycle case includes native property frames, normal/user-cancel
+# wizards and guarded creation teardown. A local successful run takes ~29s;
+# keep a bounded timeout with headroom for Windows GUI scheduling.
+set_tests_properties(openatl.activex_lifecycle PROPERTIES TIMEOUT 60)
 
 # Run the pinned original class sources inside the existing STA events case.
 # No new executable, test mode, exports or external project are introduced.
