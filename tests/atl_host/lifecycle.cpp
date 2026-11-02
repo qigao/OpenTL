@@ -1154,7 +1154,13 @@ public:
 class OriginalWtlAxPage : public WTL::CAxPropertyPageImpl<OriginalWtlAxPage> {
 public:
     enum { IDD = 610 };
-    int initialized = 0, destroyed = 0;
+    int initialized = 0, destroyed = 0, createCalls = 0;
+    HRESULT createResult = E_UNEXPECTED;
+    HRESULT CreateActiveXControls(UINT id) override {
+        ++createCalls;
+        createResult = WTL::CAxPropertyPageImpl<OriginalWtlAxPage>::CreateActiveXControls(id);
+        return createResult;
+    }
     LRESULT OnInit(UINT, WPARAM, LPARAM, BOOL& handled) {
         ++initialized;
         handled = FALSE; // The WTL base must run DLGINIT/sink handling.
@@ -1171,8 +1177,7 @@ public:
         CHAIN_MSG_MAP(WTL::CAxPropertyPageImpl<OriginalWtlAxPage>)
     END_MSG_MAP()
 };
-bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module) {
-    const CLSID registeredId = state.classId;
+bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID registeredId) {
     state = ControlState{};
     state.classId = registeredId;
     state.discoverWindow = true;
@@ -1197,10 +1202,12 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module) {
     if (!pageReady) {
         std::fprintf(stderr,
             "WTL_AX_PAGE_FAIL selection=%lld native_page=%p bound_page=%p initialized=%d"
-            " page_count=%d active=%d last_error=%lu\\n",
+            " create_calls=%d create_hr=%08lx activated=%d loaded=%d inits=%d last_error=%lu\n",
             static_cast<long long>(selection), static_cast<void*>(nativePage),
             static_cast<void*>(page.m_hWnd), page.initialized,
-            sheet.GetPageCount(), sheet.GetActiveIndex(), ::GetLastError());
+            sheet.GetPageCount(), sheet.GetActiveIndex(),
+            page.createCalls, static_cast<unsigned long>(page.createResult),
+            state.activated, state.loaded, state.initialized, ::GetLastError());
         // Do not destroy the C++ owner while Windows still owns a page.
         ::DestroyWindow(sheetWindow);
         return false;
@@ -1225,7 +1232,7 @@ bool resourceInitialization() {
     Registration registration;
     REQUIRE(::CoRegisterClassObject(classId, factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &registration.cookie) == S_OK);
     ATL::CAtlModule module;
-    REQUIRE(originalWtlAxPage(state, module));
+    REQUIRE(originalWtlAxPage(state, module, classId));
     for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619), WORD(620), WORD(621), WORD(622), WORD(631), WORD(632), WORD(633), WORD(648)}) for (int mode = 0; mode < 5; ++mode) {
         state = ControlState{}; state.classId = classId; state.discoverWindow = true;
         state.siteFirst = mode != 1; state.initInterface = mode != 2;
