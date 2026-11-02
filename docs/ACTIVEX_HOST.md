@@ -136,3 +136,57 @@ See [storage-to-stream persistence](ATL_COMPATIBILITY.md#storage-to-stream-persi
 See [native property frames](ATL_COMPATIBILITY.md#native-property-frames).
 Simple sink handlers currently return void or HRESULT; the complete Automation
 return-value surface is not yet implemented.
+
+## Modeless property-sheet creation and forced teardown
+
+Native `PropertySheet` retains its own state while creating pages. A control
+calling `DestroyWindow(sheet)` from `IPersistStreamInit::Load` can free that state
+inside the still-active native creation stack. Retaining the COM object or ATL
+callback thunk cannot retain Windows' separate allocation. A debugger capture
+on Windows x64 identified `comctl32!PropSheetDlgProc` freeing the sheet state
+during nested `WM_NCDESTROY`, followed by `comctl32!RemovePropPageData` reading
+the same freed block when `PageChange` resumed.
+
+Owners that permit controls to request destruction during modeless creation can
+opt into `ATL::CPropertySheetCreationGuard` from `atlhost.h` (or include
+`openatl/atl_property_sheet_creation.h` directly). The scope installs a CBT hook
+on the calling thread and rejects native destruction of that specific sheet
+until creation returns. OpenATL hosting detects the pending cancellation after
+external initialization calls and returns `E_ABORT` before activation. `Complete`
+removes the hook, destroys the cancelled sheet and returns NULL with
+`ERROR_CANCELLED`. No message-loop iteration or posted cancellation is required.
+
+```cpp
+// The caller owns the sheet and its pages through final HWND retirement.
+HWND CreateSettingsSheet(WTL::CPropertySheet& sheet, HWND parent) {
+    ATL::CPropertySheetCreationGuard creation(sheet.m_hWnd);
+    if (!creation.IsInstalled())
+        return nullptr; // Preserve the native hook-installation error.
+    return creation.Complete(sheet.Create(parent));
+}
+```
+
+Use this scope only around modeless `Create`, on the window thread, in the same
+module as its OpenATL host. Keep the HWND storage and C++ sheet/page owners
+alive through completion. Nested scopes restore the outer context and affect
+only their bound HWNDs. If cancellation was requested, scope exit also performs
+the deferred retirement on an early return. Hook removal and retirement fail
+fast if Windows refuses cleanup, so no callback can outlive the scope.
+
+This is a changed teardown contract: the in-flight `DestroyWindow` returns
+FALSE and the sheet stays alive until native creation has unwound. Unprotected
+immediate destruction remains unsafe. Existing WTL source and unguarded window
+behavior are unchanged. For ordinary user Cancel, continue to use native
+`PSBTN_CANCEL`/`PSN_QUERYCANCEL`/`PSN_RESET`, then destroy a modeless sheet after
+`PSM_GETCURRENTPAGEHWND` becomes NULL, as specified by
+[PropertySheetW](https://learn.microsoft.com/en-us/windows/win32/api/prsht/nf-prsht-propertysheetw).
+
+Rejected property pages can leave an unconsumed WTL dialog-creation record.
+The ATL dialog owner unlinks its pending record on destruction before releasing
+its thunk storage, so a later unrelated dialog cannot traverse a dead page's
+creation record.
+
+The lifecycle fixture is quiet on success. For manual debugger or heap
+diagnostics, set `OPENATL_TRACE_WIZARD_TEARDOWN=1` to enable the detailed
+teardown phases, native callback counters and heap checkpoints. The native
+ARM64 acceptance harness continues to require empty stderr by default.

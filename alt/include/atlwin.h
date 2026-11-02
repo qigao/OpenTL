@@ -2107,6 +2107,13 @@ public:
 template <typename TBase = CWindow>
 class ATL_NO_VTABLE CDialogImplBaseT : public CWindowImplRoot<TBase> {
 public:
+    ~CDialogImplBaseT() {
+        // Original WTL queues this member before PSPCB_CREATE. A rejected
+        // page never reaches StartDialogProc to consume it; unlink it before
+        // the page owner and its thunk storage disappear.
+        (void)_AtlWinModule.RemoveCreateWndData(&this->m_thunk.cd);
+    }
+
     virtual DLGPROC GetDialogProc()
     {
         return DialogProc;
