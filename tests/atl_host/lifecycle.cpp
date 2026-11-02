@@ -2,6 +2,12 @@
 // and reentrant retirement without relying on a particular installed control.
 #include <atlhost.h>
 #include <atlctl.h>
+// The original WTL ActiveX page is compiled only in this COM-initialized
+// lifecycle fixture. Ordinary WTL GUI builds continue to forbid hosting.
+#include <atlapp.h>
+#undef _ATL_NO_HOSTING
+#include <atldlgs.h>
+#define _ATL_NO_HOSTING 1
 #include <cstdio>
 #include <new>
 #include <cstring>
@@ -1143,6 +1149,98 @@ public:
         MESSAGE_HANDLER(WM_INITDIALOG, Init)
     END_MSG_MAP()
 };
+// Exercise original, unmodified WTL 10.0 CAxPropertyPageImpl through a real
+// modeless Windows property sheet, not the ATL CAxDialogImpl substitute.
+class OriginalWtlAxPage : public WTL::CAxPropertyPageImpl<OriginalWtlAxPage> {
+public:
+    enum { IDD = 610 };
+    int initialized = 0, destroyed = 0, createCalls = 0;
+    HRESULT createResult = E_UNEXPECTED;
+    HRESULT CreateActiveXControls(UINT id) override {
+        ++createCalls;
+        createResult = WTL::CAxPropertyPageImpl<OriginalWtlAxPage>::CreateActiveXControls(id);
+        if (FAILED(createResult)) {
+            const DWORD error = ::GetLastError();
+            const HWND child = ::GetDlgItem(m_hWnd, 711);
+            WCHAR windowClass[32]{};
+            if (child) ::GetClassNameW(child, windowClass, 32);
+            std::fprintf(stderr,
+                "WTL_AX_CONTROL_FAIL hr=%08lx os_error=%lu child=%p child_class=%ls\n",
+                static_cast<unsigned long>(createResult), error,
+                static_cast<void*>(child), windowClass);
+        }
+        return createResult;
+    }
+    LRESULT OnInit(UINT, WPARAM, LPARAM, BOOL& handled) {
+        ++initialized;
+        handled = FALSE; // The WTL base must run DLGINIT/sink handling.
+        return TRUE;
+    }
+    LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL& handled) {
+        ++destroyed;
+        handled = FALSE;
+        return 0;
+    }
+    BEGIN_MSG_MAP(OriginalWtlAxPage)
+        MESSAGE_HANDLER(WM_INITDIALOG, OnInit)
+        MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
+        CHAIN_MSG_MAP(WTL::CAxPropertyPageImpl<OriginalWtlAxPage>)
+    END_MSG_MAP()
+};
+bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID registeredId) {
+    state = ControlState{};
+    state.classId = registeredId;
+    state.discoverWindow = true;
+    state.siteFirst = true;
+    // Original WTL owns the entire HGLOBAL stream. ParseInitData consumes
+    // the first DWORD (zero license characters), leaving the cursor at the
+    // persisted DWORD marker, but native IStream::Stat still reports all
+    // eight envelope bytes. Explicit ATL hosting passes a separate four-byte
+    // persistence stream and retains its independent four-byte expectation.
+    state.streamBytes = 8;
+    OriginalWtlAxPage page;
+    REQUIRE(page.m_psp.dwFlags & PSP_DLGINDIRECT);
+    REQUIRE(page.m_psp.pResource != nullptr);
+    WTL::CPropertySheet sheet(L"Original WTL ActiveX page");
+    HPROPSHEETPAGE pageHandle = page.Create();
+    REQUIRE(pageHandle != nullptr && sheet.AddPage(pageHandle));
+    HWND sheetWindow = sheet.Create(nullptr);
+    REQUIRE(sheetWindow && ::IsWindow(sheetWindow));
+    // Modeless property sheets can defer page activation. Ask the native
+    // sheet to select its first page; never manufacture the HWND or invoke
+    // application callbacks directly.
+    const LRESULT selection = ::SendMessageW(sheetWindow, PSM_SETCURSEL, 0, 0);
+    const HWND nativePage = reinterpret_cast<HWND>(
+        ::SendMessageW(sheetWindow, PSM_GETCURRENTPAGEHWND, 0, 0));
+    const bool pageReady = page.initialized == 1 &&
+        page.m_hWnd && ::IsWindow(page.m_hWnd) &&
+        nativePage == page.m_hWnd;
+    if (!pageReady) {
+        std::fprintf(stderr,
+            "WTL_AX_PAGE_FAIL selection=%lld native_page=%p bound_page=%p initialized=%d"
+            " page_count=%d active=%d create_calls=%d create_hr=%08lx"
+            " activated=%d loaded=%d inits=%d last_error=%lu\n",
+            static_cast<long long>(selection), static_cast<void*>(nativePage),
+            static_cast<void*>(page.m_hWnd), page.initialized,
+            sheet.GetPageCount(), sheet.GetActiveIndex(),
+            page.createCalls, static_cast<unsigned long>(page.createResult),
+            state.activated, state.loaded, state.initialized, ::GetLastError());
+        // Do not destroy the C++ owner while Windows still owns a page.
+        ::DestroyWindow(sheetWindow);
+        return false;
+    }
+    HWND controlWindow = ::GetDlgItem(page.m_hWnd, 711);
+    REQUIRE(controlWindow && ::IsWindow(controlWindow));
+    ATL::CAxWindow control(controlWindow);
+    ATL::CComPtr<IOleObject> object;
+    REQUIRE(control.QueryControl(IID_IOleObject, reinterpret_cast<void**>(&object)) == S_OK);
+    REQUIRE(state.activated == 1 && state.loaded == 1 && state.siteOrder);
+    object.Release();
+    REQUIRE(::DestroyWindow(sheetWindow));
+    REQUIRE(page.destroyed == 1 && state.closed == 1 &&
+            state.destroyed == 1 && module.GetLockCount() == 0);
+    return true;
+}
 bool resourceInitialization() {
     ControlState state;
     CLSID classId{};
@@ -1151,6 +1249,7 @@ bool resourceInitialization() {
     Registration registration;
     REQUIRE(::CoRegisterClassObject(classId, factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &registration.cookie) == S_OK);
     ATL::CAtlModule module;
+    REQUIRE(originalWtlAxPage(state, module, classId));
     for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619), WORD(620), WORD(621), WORD(622), WORD(631), WORD(632), WORD(633), WORD(648)}) for (int mode = 0; mode < 5; ++mode) {
         state = ControlState{}; state.classId = classId; state.discoverWindow = true;
         state.siteFirst = mode != 1; state.initInterface = mode != 2;
