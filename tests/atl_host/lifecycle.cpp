@@ -1232,6 +1232,18 @@ public:
         MESSAGE_HANDLER(WM_INITDIALOG, Init)
     END_MSG_MAP()
 };
+// A native sheet may remain alive when REQUIRE returns from its owner test.
+// Retire the HWND before the WTL C++ page/sheet owners unwind. This applies to
+// failed assertions too, not just successful calls to DestroyWindow().
+struct NativeSheetGuard {
+    HWND window;
+    explicit NativeSheetGuard(HWND value) noexcept : window(value) {}
+    NativeSheetGuard(const NativeSheetGuard&) = delete;
+    NativeSheetGuard& operator=(const NativeSheetGuard&) = delete;
+    ~NativeSheetGuard() noexcept {
+        if (window && ::IsWindow(window)) (void)::DestroyWindow(window);
+    }
+};
 // Exercise original, unmodified WTL 10.0 CAxPropertyPageImpl through a real
 // modeless Windows property sheet, not the ATL CAxDialogImpl substitute.
 class OriginalWtlAxPage : public WTL::CAxPropertyPageImpl<OriginalWtlAxPage>,
@@ -1322,6 +1334,7 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID re
     REQUIRE(ordinaryHandle != nullptr && sheet.AddPage(ordinaryHandle));
     REQUIRE(sheet.GetPageCount() == 2);
     HWND sheetWindow = sheet.Create(nullptr);
+    NativeSheetGuard owner{sheetWindow};
     REQUIRE(sheetWindow && ::IsWindow(sheetWindow));
     // Modeless property sheets can defer page activation. Ask the native
     // sheet to select its first page; never manufacture the HWND or invoke
@@ -1408,6 +1421,7 @@ bool originalWtlAxPageFailedInit(ControlState& state, ATL::CAtlModule& module,
     const HPROPSHEETPAGE handle = page.Create();
     REQUIRE(handle && sheet.AddPage(handle));
     const HWND window = sheet.Create(nullptr);
+    NativeSheetGuard owner{window};
     REQUIRE(window && ::IsWindow(window));
     // Drive Windows' own page activation; do not synthesize callbacks.
     REQUIRE(::SendMessageW(window, PSM_SETCURSEL, 0, 0));
@@ -1524,12 +1538,7 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
     REQUIRE(first && wizard.AddPage(first) && second && wizard.AddPage(second));
     const HWND sheet = wizard.Create(nullptr);
     REQUIRE(sheet && ::IsWindow(sheet));
-    // Ensure every failing assertion still retires the actual native sheet
-    // before the C++ page owners go out of scope.
-    struct SheetRetirement {
-        HWND hwnd;
-        ~SheetRetirement() { if (::IsWindow(hwnd)) ::DestroyWindow(hwnd); }
-    } retirement{sheet};
+    NativeSheetGuard owner{sheet};
     REQUIRE(::SendMessageW(sheet, PSM_SETCURSEL, 0, 0));
     REQUIRE(reinterpret_cast<HWND>(
                 ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0)) ==
