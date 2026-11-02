@@ -423,7 +423,16 @@ public:
         return done == stored ? S_OK : STG_E_WRITEFAULT;
     }
 
+    // All reads use a finite default budget, including the legacy signature.
+    // Applications with a larger trusted record may opt in explicitly.
+    static constexpr ULONG kDefaultStreamByteBudget = 16u * 1024u * 1024u;
+
     HRESULT ReadFromStream(IStream* stream) noexcept
+    {
+        return ReadFromStream(stream, kDefaultStreamByteBudget);
+    }
+
+    HRESULT ReadFromStream(IStream* stream, ULONG maxPayloadBytes) noexcept
     {
         if (!stream) return E_POINTER;
         ULONG stored = 0, done = 0;
@@ -433,6 +442,10 @@ public:
         if (!stored) { Empty(); return S_OK; }
         if (stored < sizeof(OLECHAR)) return E_FAIL;
         const ULONG bytes = stored - sizeof(OLECHAR);
+        // Count comes from the stream, not the actual remaining data size.
+        // Reject it before allocating or reading the payload.
+        if (bytes > maxPayloadBytes)
+            return HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
         BSTR staged = ::SysAllocStringByteLen(nullptr, bytes);
         if (!staged) return E_OUTOFMEMORY;
         done = 0;
@@ -742,6 +755,89 @@ public:
         return S_OK;
     }
 
+    // Exact successful wire length for the supported scalar/BSTR subset.
+    // As in ATL, sizeof(VARTYPE) indicates an unsupported/overflow result;
+    // it is also a valid size for VT_EMPTY and VT_NULL.
+    ULONG GetSize() const noexcept
+    {
+        const int bytes = StreamScalarSize(vt);
+        if (bytes >= 0)
+            return static_cast<ULONG>(sizeof(VARTYPE)) +
+                   static_cast<ULONG>(bytes);
+        if (vt != VT_BSTR)
+            return static_cast<ULONG>(sizeof(VARTYPE));
+
+        constexpr ULONG envelope =
+            static_cast<ULONG>(sizeof(VARTYPE) + sizeof(ULONG));
+        if (!bstrVal)
+            return envelope;
+        const ULONG payload = ::SysStringByteLen(bstrVal);
+        const ULONG terminator = static_cast<ULONG>(sizeof(OLECHAR));
+        if (payload > (std::numeric_limits<ULONG>::max)() -
+                      envelope - terminator)
+            return static_cast<ULONG>(sizeof(VARTYPE));
+        return envelope + payload + terminator;
+    }
+
+    // Bounded stream subset: no implicit coercion or COM activation.
+    HRESULT WriteToStream(IStream* stream) noexcept
+    {
+        if (!stream) return E_POINTER;
+        const int bytes = StreamScalarSize(vt);
+        if (bytes < 0 && vt != VT_BSTR) return DISP_E_BADVARTYPE;
+        ULONG done = 0;
+        HRESULT hr = stream->Write(&vt, sizeof(vt), &done);
+        if (FAILED(hr)) return hr;
+        if (done != sizeof(vt)) return STG_E_WRITEFAULT;
+        if (vt == VT_BSTR) {
+            CComBSTR borrowed;
+            borrowed.m_str = bstrVal;
+            hr = borrowed.WriteToStream(stream);
+            borrowed.Detach();
+            return hr;
+        }
+        if (!bytes) return S_OK;
+        done = 0;
+        hr = stream->Write(&bVal, static_cast<ULONG>(bytes), &done);
+        if (FAILED(hr)) return hr;
+        return done == static_cast<ULONG>(bytes) ? S_OK : STG_E_WRITEFAULT;
+    }
+
+    HRESULT ReadFromStream(IStream* stream) noexcept
+    {
+        return ReadFromStream(stream, CComBSTR::kDefaultStreamByteBudget);
+    }
+
+    // maxBstrPayloadBytes is in bytes, excluding the wire terminator.
+    HRESULT ReadFromStream(IStream* stream, ULONG maxBstrPayloadBytes) noexcept
+    {
+        if (!stream) return E_POINTER;
+        VARTYPE type = VT_EMPTY;
+        ULONG done = 0;
+        HRESULT hr = stream->Read(&type, sizeof(type), &done);
+        if (FAILED(hr)) return hr;
+        if (done != sizeof(type)) return STG_E_READFAULT;
+        const int bytes = StreamScalarSize(type);
+        if (bytes < 0 && type != VT_BSTR) return DISP_E_BADVARTYPE;
+        CComVariant staged;
+        if (type == VT_BSTR) {
+            CComBSTR text;
+            hr = text.ReadFromStream(stream, maxBstrPayloadBytes);
+            if (FAILED(hr)) return hr;
+            staged.vt = VT_BSTR;
+            staged.bstrVal = text.Detach();
+        } else {
+            staged.vt = type;
+            if (bytes) {
+                done = 0;
+                hr = stream->Read(&staged.bVal, static_cast<ULONG>(bytes), &done);
+                if (FAILED(hr)) return hr;
+                if (done != static_cast<ULONG>(bytes)) return STG_E_READFAULT;
+            }
+        }
+        return staged.Detach(this);
+    }
+
     HRESULT ChangeType(VARTYPE vtNew, const VARIANT* pSrc = NULL) noexcept
     {
         VARIANT* pVar = const_cast<VARIANT*>(pSrc);
@@ -761,6 +857,20 @@ public:
         }
         return hr;
     }
+private:
+    static int StreamScalarSize(VARTYPE type) noexcept
+    {
+        switch (type) {
+        case VT_EMPTY: case VT_NULL: return 0;
+        case VT_I1: case VT_UI1: return 1;
+        case VT_I2: case VT_UI2: case VT_BOOL: return 2;
+        case VT_I4: case VT_UI4: case VT_INT: case VT_UINT:
+        case VT_R4: case VT_ERROR: return 4;
+        case VT_I8: case VT_UI8: case VT_R8: case VT_CY: case VT_DATE: return 8;
+        default: return -1;
+        }
+    }
+
 };
 
 } // namespace ATL
