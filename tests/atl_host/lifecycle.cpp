@@ -349,7 +349,7 @@ void TraceWizardHeaps(ControlState& state, const char* phase) noexcept {
         }
     }
     std::fprintf(stderr,
-        "WTL_HEAP_CHECK phase=%s total=%lu inspected=%lu invalid=%lu complete=%d\\n",
+        "WTL_HEAP_CHECK phase=%s total=%lu inspected=%lu invalid=%lu complete=%d\n",
         phase, static_cast<unsigned long>(total),
         static_cast<unsigned long>(inspected), static_cast<unsigned long>(invalid),
         total != 0 && total <= 64);
