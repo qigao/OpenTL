@@ -1,8 +1,16 @@
 // Native COM site helper acceptance. The original WTL PrintDlgEx inherits
 // IObjectWithSiteImpl<T>; this tests its COM ownership without invoking UI.
+#define _ATL_NO_AUTOMATIC_NAMESPACE
+template<class T> struct CComPtr { enum { application_owned = 1 }; };
+#include <atlcomcli.h>
+static_assert(CComPtr<IUnknown>::application_owned == 1,
+              "Standalone atlcomcli.h must honor the namespace opt-out");
+using QualifiedComPointer = ATL::CComPtr<IUnknown>;
 #include <atlcom.h>
 #include <ocidl.h>
 #include <cstdio>
+static_assert(CComPtr<IUnknown>::application_owned == 1,
+              "Later ATL headers must preserve the namespace opt-out");
 
 class RecordingSite final : public IUnknown {
 public:

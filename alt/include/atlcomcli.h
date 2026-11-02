@@ -6,14 +6,15 @@
 
 #pragma once
 
-#include "atldef.h"
-
+#include "openatl/platform.h"
 #include <ole2.h>
 #include <memory>
 #include <limits>
 #include <cwchar>
 #include <cstring>
 #include <exception>
+// Initialize the native SDK and C++ runtime before the legacy _MSC_VER shim.
+#include "atldef.h"
 #include "openatl/text_encoding.h"
 
 namespace ATL {
@@ -422,7 +423,16 @@ public:
         return done == stored ? S_OK : STG_E_WRITEFAULT;
     }
 
+    // All reads use a finite default budget, including the legacy signature.
+    // Applications with a larger trusted record may opt in explicitly.
+    static constexpr ULONG kDefaultStreamByteBudget = 16u * 1024u * 1024u;
+
     HRESULT ReadFromStream(IStream* stream) noexcept
+    {
+        return ReadFromStream(stream, kDefaultStreamByteBudget);
+    }
+
+    HRESULT ReadFromStream(IStream* stream, ULONG maxPayloadBytes) noexcept
     {
         if (!stream) return E_POINTER;
         ULONG stored = 0, done = 0;
@@ -432,6 +442,10 @@ public:
         if (!stored) { Empty(); return S_OK; }
         if (stored < sizeof(OLECHAR)) return E_FAIL;
         const ULONG bytes = stored - sizeof(OLECHAR);
+        // Count comes from the stream, not the actual remaining data size.
+        // Reject it before allocating or reading the payload.
+        if (bytes > maxPayloadBytes)
+            return HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
         BSTR staged = ::SysAllocStringByteLen(nullptr, bytes);
         if (!staged) return E_OUTOFMEMORY;
         done = 0;
@@ -741,6 +755,30 @@ public:
         return S_OK;
     }
 
+    // Exact successful wire length for the supported scalar/BSTR subset.
+    // As in ATL, sizeof(VARTYPE) indicates an unsupported/overflow result;
+    // it is also a valid size for VT_EMPTY and VT_NULL.
+    ULONG GetSize() const noexcept
+    {
+        const int bytes = StreamScalarSize(vt);
+        if (bytes >= 0)
+            return static_cast<ULONG>(sizeof(VARTYPE)) +
+                   static_cast<ULONG>(bytes);
+        if (vt != VT_BSTR)
+            return static_cast<ULONG>(sizeof(VARTYPE));
+
+        constexpr ULONG envelope =
+            static_cast<ULONG>(sizeof(VARTYPE) + sizeof(ULONG));
+        if (!bstrVal)
+            return envelope;
+        const ULONG payload = ::SysStringByteLen(bstrVal);
+        const ULONG terminator = static_cast<ULONG>(sizeof(OLECHAR));
+        if (payload > (std::numeric_limits<ULONG>::max)() -
+                      envelope - terminator)
+            return static_cast<ULONG>(sizeof(VARTYPE));
+        return envelope + payload + terminator;
+    }
+
     // Bounded stream subset: no implicit coercion or COM activation.
     HRESULT WriteToStream(IStream* stream) noexcept
     {
@@ -767,6 +805,12 @@ public:
 
     HRESULT ReadFromStream(IStream* stream) noexcept
     {
+        return ReadFromStream(stream, CComBSTR::kDefaultStreamByteBudget);
+    }
+
+    // maxBstrPayloadBytes is in bytes, excluding the wire terminator.
+    HRESULT ReadFromStream(IStream* stream, ULONG maxBstrPayloadBytes) noexcept
+    {
         if (!stream) return E_POINTER;
         VARTYPE type = VT_EMPTY;
         ULONG done = 0;
@@ -778,7 +822,7 @@ public:
         CComVariant staged;
         if (type == VT_BSTR) {
             CComBSTR text;
-            hr = text.ReadFromStream(stream);
+            hr = text.ReadFromStream(stream, maxBstrPayloadBytes);
             if (FAILED(hr)) return hr;
             staged.vt = VT_BSTR;
             staged.bstrVal = text.Detach();
@@ -830,5 +874,9 @@ private:
 };
 
 } // namespace ATL
+
+#ifndef _ATL_NO_AUTOMATIC_NAMESPACE
+using namespace ATL;
+#endif
 
 #endif // __ATLCOMCLI_H__

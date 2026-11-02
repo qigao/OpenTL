@@ -16,8 +16,19 @@
 #include <cwchar>
 #include <limits>
 #include <utility>
-#include <atlbase.h>
+#include <type_traits>
 #include <atlcomcli.h>
+
+// WeaselTSF includes atlcomcli.h directly before declaring this alias.
+// Keep this check before atlbase.h can supply its own namespace import.
+template<typename I> using com_ptr = CComPtr<I>;
+static_assert(std::is_same<com_ptr<IUnknown>, ATL::CComPtr<IUnknown>>::value,
+              "Standalone atlcomcli.h must expose the default ATL namespace");
+static_assert(std::is_same<CComQIPtr<IUnknown>, ATL::CComQIPtr<IUnknown>>::value &&
+              std::is_same<CComBSTR, ATL::CComBSTR>::value &&
+              std::is_same<CComVariant, ATL::CComVariant>::value,
+              "Standalone COM client names must match the ATL implementation");
+#include <atlbase.h>
 
 #if !defined(OPENATL_REPOSITORY_HEADERS) || OPENATL_REPOSITORY_HEADERS != 0x4F41544CUL
 #error "This target must compile repository-owned OpenATL headers"
@@ -211,6 +222,33 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
                    std::wcscmp(value.m_str,L"keep"))
             return failure(82,"BSTR_malformed_preserves_owner",hr);
     }
+    // A wire-declared BSTR length must be rejected before allocation.
+    // A small explicit budget also prevents valid but unwanted large reads.
+    const HRESULT oversizedHr = HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
+    ATL::CComPtr<IStream> hugeBstr;
+    const ULONG hostileCount = 0xfffffffeu;
+    if (::CreateStreamOnHGlobal(nullptr, TRUE, &hugeBstr)!=S_OK ||
+        hugeBstr->Write(&hostileCount, sizeof(hostileCount), nullptr)!=S_OK ||
+        hugeBstr->Seek(start, STREAM_SEEK_SET, nullptr)!=S_OK)
+        return failure(103, "BSTR_hostile_count_setup", E_FAIL);
+    ATL::CComBSTR budgeted(L"keep");
+    BSTR originalBstr = budgeted.m_str;
+    if (budgeted.ReadFromStream(hugeBstr)!=oversizedHr ||
+        budgeted.m_str!=originalBstr ||
+        std::wcscmp(budgeted.m_str,L"keep"))
+        return failure(104, "BSTR_default_budget_preallocation", E_FAIL);
+    ATL::CComPtr<IStream> smallBstr;
+    if (::CreateStreamOnHGlobal(nullptr, TRUE, &smallBstr)!=S_OK ||
+        smallBstr->Write(records[2], sizes[2], nullptr)!=S_OK ||
+        smallBstr->Seek(start, STREAM_SEEK_SET, nullptr)!=S_OK ||
+        budgeted.ReadFromStream(smallBstr, 2)!=oversizedHr ||
+        budgeted.m_str!=originalBstr ||
+        smallBstr->Seek(start, STREAM_SEEK_SET, nullptr)!=S_OK ||
+        budgeted.ReadFromStream(smallBstr, 3)!=S_OK ||
+        budgeted.ByteLength()!=3 ||
+        std::memcmp(budgeted.m_str, records[2]+4, 3))
+        return failure(105, "BSTR_custom_budget_retry", E_FAIL);
+
     for (unsigned at=1;at<=2;++at) {
         const HRESULT results[] = {S_OK,S_FALSE,E_ACCESSDENIED};
         for (HRESULT injected : results) {
@@ -251,6 +289,11 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
             value.WriteToStream(encoded)!=S_OK ||
             encoded->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK)
             return failure(88,"VARIANT_scalar_write",E_FAIL);
+        STATSTG scalarInfo{};
+        if (value.GetSize()!=sizeof(VARTYPE)+scalarSizes[i] ||
+            encoded->Stat(&scalarInfo,STATFLAG_NONAME)!=S_OK ||
+            scalarInfo.cbSize.QuadPart!=value.GetSize())
+            return failure(109,"VARIANT_scalar_GetSize_matches_stream",E_FAIL);
         VARTYPE tag=VT_EMPTY;
         unsigned char actual[8]{};
         if (encoded->Read(&tag,sizeof(tag),&read)!=S_OK || read!=sizeof(tag) ||
@@ -271,12 +314,19 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
         variantRead.ReadFromStream(variantStream)!=S_OK || variantRead!=variantText ||
         variantRead.ReadFromStream(variantStream)!=STG_E_READFAULT || variantRead!=variantText)
         return failure(90,"VARIANT_BSTR_stream_ownership",E_FAIL);
+    STATSTG variantTextInfo{};
+    if (variantText.GetSize()!=sizeof(VARTYPE)+sizeof(ULONG)+
+                                 a.ByteLength()+sizeof(OLECHAR) ||
+        variantStream->Stat(&variantTextInfo,STATFLAG_NONAME)!=S_OK ||
+        variantTextInfo.cbSize.QuadPart!=variantText.GetSize())
+        return failure(110,"VARIANT_BSTR_GetSize_matches_stream",E_FAIL);
     ATL::CComVariant rejected;
     rejected.vt=VT_BYREF|VT_I4;
     rejected.plVal=nullptr;
     STATSTG before{},after{};
     if (variantStream->Stat(&before,STATFLAG_NONAME)!=S_OK ||
         rejected.WriteToStream(variantStream)!=DISP_E_BADVARTYPE ||
+        rejected.GetSize()!=sizeof(VARTYPE) ||
         variantStream->Stat(&after,STATFLAG_NONAME)!=S_OK ||
         before.cbSize.QuadPart!=after.cbSize.QuadPart ||
         variantRead.ReadFromStream(nullptr)!=E_POINTER ||
@@ -346,12 +396,40 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
         unsigned char actual[11]{};
         if (::CreateStreamOnHGlobal(nullptr,TRUE,&output)!=S_OK ||
             value.WriteToStream(output)!=S_OK ||
+            value.GetSize()!=sizeof(VARTYPE)+sizes[i] ||
             output->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK ||
             output->Read(actual,sizes[i]+sizeof(tag),&read)!=S_OK ||
             read!=sizes[i]+sizeof(tag) || actual[0]!=VT_BSTR || actual[1] ||
             std::memcmp(actual+sizeof(tag),records[i],sizes[i]))
             return failure(102,"VARIANT_binary_BSTR_write",E_FAIL);
     }
+    // A VARIANT's tag must not bypass the BSTR allocation limit.
+    ATL::CComPtr<IStream> hugeVariant;
+    const VARTYPE bstrType = VT_BSTR;
+    if (::CreateStreamOnHGlobal(nullptr, TRUE, &hugeVariant)!=S_OK ||
+        hugeVariant->Write(&bstrType, sizeof(bstrType), nullptr)!=S_OK ||
+        hugeVariant->Write(&hostileCount, sizeof(hostileCount), nullptr)!=S_OK ||
+        hugeVariant->Seek(start, STREAM_SEEK_SET, nullptr)!=S_OK)
+        return failure(106, "VARIANT_hostile_count_setup", E_FAIL);
+    ATL::CComVariant guardedBstr(L"keep");
+    BSTR originalVariantBstr = guardedBstr.bstrVal;
+    if (guardedBstr.ReadFromStream(hugeVariant)!=oversizedHr ||
+        guardedBstr.vt!=VT_BSTR ||
+        guardedBstr.bstrVal!=originalVariantBstr)
+        return failure(107, "VARIANT_default_budget_preserves_owner", E_FAIL);
+    ATL::CComPtr<IStream> smallVariant;
+    if (::CreateStreamOnHGlobal(nullptr, TRUE, &smallVariant)!=S_OK ||
+        smallVariant->Write(&bstrType, sizeof(bstrType), nullptr)!=S_OK ||
+        smallVariant->Write(records[2], sizes[2], nullptr)!=S_OK ||
+        smallVariant->Seek(start, STREAM_SEEK_SET, nullptr)!=S_OK ||
+        guardedBstr.ReadFromStream(smallVariant, 2)!=oversizedHr ||
+        guardedBstr.bstrVal!=originalVariantBstr ||
+        smallVariant->Seek(start, STREAM_SEEK_SET, nullptr)!=S_OK ||
+        guardedBstr.ReadFromStream(smallVariant, 3)!=S_OK ||
+        guardedBstr.vt!=VT_BSTR || ::SysStringByteLen(guardedBstr.bstrVal)!=3 ||
+        std::memcmp(guardedBstr.bstrVal, records[2]+4, 3))
+        return failure(108, "VARIANT_custom_budget_retry", E_FAIL);
+
     ATL::CComPtr<IStream> truncatedScalar;
     const unsigned char incompleteI4[] = {VT_I4,0,0x42,0};
     if (::CreateStreamOnHGlobal(nullptr,TRUE,&truncatedScalar)!=S_OK ||
@@ -441,7 +519,7 @@ static int system_component_client() {
         reinterpret_cast<void**>(&raw));
     if(FAILED(hr)||raw==nullptr)return failure(11,"CoCreateInstance_GIT",hr);
     {
-        ATL::CComPtr<IGlobalInterfaceTable> git;
+        com_ptr<IGlobalInterfaceTable> git;
         git.Attach(raw);
         raw=nullptr;
         ATL::CComPtr<IGlobalInterfaceTable> shared(git);

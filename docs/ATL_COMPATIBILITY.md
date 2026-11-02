@@ -1129,9 +1129,15 @@ and odd-byte BSTR payloads are counted, not scanned. Short reads/writes
 return STG_E_READFAULT/STG_E_WRITEFAULT; failed HRESULTs are propagated.
 Invalid terminators are rejected. Reads stage native BSTR ownership and
 preserve the previous value on failure; the stream position is not rolled
-back. Writes can leave a partial record. Callers must validate the encoded ULONG byte count against their allocation
-budget before invoking this allocation-based API; bounding only the actual
-stream size does not bound the declared allocation.
+back. Writes can leave a partial record. Both one-argument reads impose a
+16 MiB default BSTR payload budget before allocating. The two-argument
+ReadFromStream(stream, maxPayloadBytes) overload allows callers to choose a
+smaller limit for untrusted records, or explicitly permit larger trusted
+records. The budget counts payload bytes, excluding the two-byte wire
+terminator; declared lengths over budget return HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE),
+without changing the existing owner. The encoded ULONG, not the actual
+stream size, controls allocation; an oversized record consumes only its
+length field before rejection. Writes do not impose a payload cap.
 
 This is the first subset of #94. The bounded VARIANT stream candidate is documented below; property-map stream
 persistence and IPersistStreamInitImpl remain unimplemented. #95–#97 are
@@ -1156,6 +1162,25 @@ contract and ownership, not interoperability with every Microsoft ATL release.
 EMPTY/NULL and I8/UI8 stream representations in particular still require
 independent target-version ATL evidence before claiming interoperability.
 The public CComVariant methods do not coerce unsupported values through BSTR.
+For the admitted scalar/BSTR subset, CComVariant::GetSize() now matches
+the successful WriteToStream byte count: VARTYPE + fixed scalar bytes,
+or VARTYPE + ULONG + nullable BSTR bytes and terminator. It returns
+sizeof(VARTYPE) for unsupported values and on BSTR size overflow,
+consistent with the documented error marker. VT_EMPTY and VT_NULL also
+have that legitimate two-byte stream length; the caller must check
+the variant type rather than interpreting the size alone as success.
+It does not query IPersistStream/IPersistStreamInit or activate interface
+values, because those values are intentionally unsupported here.
+The existing real IStream suite compares GetSize() with native Stat()
+for all admitted scalar tags and null/allocated-empty/binary BSTRs.
+
+The same 16 MiB one-argument budget applies to VT_BSTR inside VARIANT;
+ReadFromStream(stream, maxBstrPayloadBytes) bounds the nested BSTR before
+allocation. Scalar records do not allocate, and the budget does not change
+the fixed-width scalar encoding. The existing native suite tests both default
+and caller-selected limits, hostile encoded lengths, transactionality and
+retry. These checks do not establish Microsoft ATL version-specific wire
+interoperability.
 
 ## COM property-page authoring foundation (qualification pending)
 

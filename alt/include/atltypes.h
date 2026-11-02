@@ -44,6 +44,8 @@ public:
     CSize(SIZE initSize) noexcept { cx = initSize.cx; cy = initSize.cy; }
     CSize(POINT initPt) noexcept { cx = initPt.x; cy = initPt.y; }
 
+    void SetSize(int x, int y) noexcept { cx = x; cy = y; }
+
     BOOL operator==(SIZE size) const noexcept { return (cx == size.cx && cy == size.cy); }
     BOOL operator!=(SIZE size) const noexcept { return (cx != size.cx || cy != size.cy); }
 
