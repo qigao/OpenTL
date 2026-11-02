@@ -314,6 +314,7 @@ struct ControlState {
     bool storageInterface = true, storageReadOnly = true, rejectLicense = false, destroyDuringStorageQuery = false;
     bool discoverWindow = false, destroyDialogDuringInit = false, sendInitDuringLoad = false;
     bool destroyWizardDuringLoad = false;
+    unsigned wizardTraceSequence = 0;
     int wizardCancelRequests = 0;
     bool wizardCancelSucceeded = false;
     ULONG streamBytes = 4;
@@ -323,6 +324,16 @@ struct ControlState {
     int storageLoaded = 0, storageReleased = 0, lateStorageReads = 0;
     PropertyState* properties = nullptr;
 };
+void TraceWizardReentry(ControlState& state, const char* phase, HWND other = nullptr) noexcept {
+    if (!state.destroyWizardDuringLoad) return;
+    std::fprintf(stderr,
+        "WTL_REENTRANT_PHASE seq=%u phase=%s host=%p other=%p"
+        " loaded=%d activated=%d closed=%d detached=%d destroyed=%d\n",
+        ++state.wizardTraceSequence, phase, static_cast<void*>(state.window),
+        static_cast<void*>(other), state.loaded, state.activated,
+        state.closed, state.detached, state.destroyed);
+    std::fflush(stderr);
+}
 class Control : public IOleObject, public IPersistStreamInit, public IPersistStream, public IPersistStorage,
                 public IRunnableObject, public ATL::ISpecifyPropertyPagesImpl<Control>,
                 public IDispatch, public ATL::IPerPropertyBrowsingImpl<Control>,
@@ -441,6 +452,7 @@ public:
         ::VariantInit(result); result->vt = VT_I4; result->lVal = state_.properties->value; return S_OK;
     }
     HRESULT STDMETHODCALLTYPE SetClientSite(IOleClientSite* site) override {
+        TraceWizardReentry(state_, site ? "SetClientSite.attach.enter" : "SetClientSite.detach.enter");
         if (!site && site_) ++state_.detached;
         if (site && state_.discoverWindow) {
             ATL::CComPtr<IOleWindow> window;
@@ -449,13 +461,17 @@ public:
             hr = window->GetWindow(&state_.window);
             if (FAILED(hr)) return hr;
         }
-        site_ = site; return S_OK;
+        site_ = site;
+        TraceWizardReentry(state_, site ? "SetClientSite.attach.return" : "SetClientSite.detach.return");
+        return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetClientSite(IOleClientSite** site) override { return site_.CopyTo(site); }
     HRESULT STDMETHODCALLTYPE SetHostNames(LPCOLESTR, LPCOLESTR) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE Close(DWORD) override {
+        TraceWizardReentry(state_, "IOleObject.Close.enter");
         ++state_.closed;
         if (storage_) { storage_.Release(); ++state_.storageReleased; }
+        TraceWizardReentry(state_, "IOleObject.Close.return");
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE SetMoniker(DWORD, IMoniker*) override { return E_NOTIMPL; }
@@ -523,6 +539,7 @@ public:
     HRESULT STDMETHODCALLTYPE GetClassID(CLSID* id) override { if (!id) return E_POINTER; *id = state_.classId; return S_OK; }
     HRESULT STDMETHODCALLTYPE IsDirty() override { return S_FALSE; }
     HRESULT STDMETHODCALLTYPE Load(IStream* stream) override {
+        TraceWizardReentry(state_, "IPersistStreamInit.Load.enter");
         ULONG read = 0; DWORD marker = 0;
         if (!stream || stream->Read(&marker, sizeof(marker), &read) != S_OK || read != sizeof(marker) || marker != 42) return E_FAIL;
         STATSTG stat{};
@@ -534,7 +551,11 @@ public:
         BYTE end = 0;
         // Native HGLOBAL streams return S_OK with zero bytes at EOF.
         if (FAILED(stream->Read(&end, 1, &read)) || read) return E_FAIL;
-        ++state_.loaded; return Initialize();
+        ++state_.loaded;
+        TraceWizardReentry(state_, "IPersistStreamInit.Load.initialize.enter");
+        const HRESULT outcome = Initialize();
+        TraceWizardReentry(state_, "IPersistStreamInit.Load.initialize.return");
+        return outcome;
     }
     HRESULT STDMETHODCALLTYPE Save(IStream*, BOOL) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE GetSizeMax(ULARGE_INTEGER* size) override { if (!size) return E_POINTER; size->QuadPart = 4; return S_OK; }
@@ -582,14 +603,17 @@ private:
             ++state_.wizardCancelRequests;
             const HWND sheet = state_.window ?
                 ::GetAncestor(state_.window, GA_ROOT) : nullptr;
+            TraceWizardReentry(state_, "DestroyWindow.enter", sheet);
             state_.wizardCancelSucceeded = sheet &&
                 ::DestroyWindow(sheet) != FALSE;
+            TraceWizardReentry(state_, "DestroyWindow.return", sheet);
         }
         if (state_.sendInitDuringLoad) ::SendMessageW(::GetParent(state_.window), WM_INITDIALOG, 0, 0);
         return state_.failInit || !state_.siteOrder || (state_.failInitializationAt &&
             state_.initialized + state_.loaded + state_.storageLoaded == state_.failInitializationAt) ? E_FAIL : S_OK;
     }
     ~Control() {
+        TraceWizardReentry(state_, "COM.control.destructor");
         if (state_.activeEventControl == this) state_.activeEventControl = nullptr;
         ++state_.destroyed;
     }
@@ -1276,10 +1300,13 @@ public:
     bool vetoWizardNext = false;
     int OnWizardNext() { ++wizardNext; return vetoWizardNext ? -1 : 0; }
     bool expectedCreateFailure = false;
+    ControlState* traceState = nullptr;
     HRESULT createResult = E_UNEXPECTED;
     HRESULT CreateActiveXControls(UINT id) override {
+        if (traceState) TraceWizardReentry(*traceState, "WTL.CreateActiveXControls.enter", m_hWnd);
         ++createCalls;
         createResult = WTL::CAxPropertyPageImpl<OriginalWtlAxPage>::CreateActiveXControls(id);
+        if (traceState) TraceWizardReentry(*traceState, "WTL.CreateActiveXControls.return", m_hWnd);
         if (FAILED(createResult) && !expectedCreateFailure) {
             const DWORD error = ::GetLastError();
             const HWND child = ::GetDlgItem(m_hWnd, 711);
@@ -1298,6 +1325,7 @@ public:
         return TRUE;
     }
     LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL& handled) {
+        if (traceState) TraceWizardReentry(*traceState, "WTL.Page.WM_DESTROY", m_hWnd);
         ++destroyed;
         handled = FALSE;
         return 0;
@@ -1633,11 +1661,14 @@ bool originalWtlWizardCancelDuringLoad(ControlState& state,
     state.destroyWizardDuringLoad = true;
     OriginalWtlAxPage page;
     page.expectedCreateFailure = true;
+    page.traceState = &state;
     WTL::CPropertySheet wizard(L"Original WTL load-time cancellation");
     wizard.SetWizardMode();
     const HPROPSHEETPAGE handle = page.Create();
     REQUIRE(handle && wizard.AddPage(handle));
+    TraceWizardReentry(state, "PropertySheet.Create.enter");
     const HWND created = wizard.Create(nullptr);
+    TraceWizardReentry(state, "PropertySheet.Create.return", created);
     const bool returnedLive = created && ::IsWindow(created);
     // If Windows returned a live sheet after synchronous cancellation,
     // it must be retired before destroying the C++ page owner.

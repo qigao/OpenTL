@@ -2121,7 +2121,7 @@ public:
             return 0;
 
         pThis->m_hWnd = hWnd;
-        if (!pThis->m_thunk.Init((WNDPROC)GuardedDialogProc, pThis)) {
+        if (!pThis->m_thunk.Init((WNDPROC)pThis->GetDialogProc(), pThis)) {
             const DWORD error = ::GetLastError();
             pThis->m_hWnd = NULL;
             pThis->OnDialogCreateFailure(hWnd, error ? error : ERROR_OUTOFMEMORY);
@@ -2141,43 +2141,9 @@ public:
         return pProc(hWnd, uMsg, wParam, lParam);
     }
 
-    // Every delivered dialog message must guard the *outside* of a custom
-    // WTL DLGPROC, not just the first StartDialogProc call. The native dialog
-    // installs m_thunk above and can call it directly on all later messages.
-    // WTL's CAxPropertyPageImpl invokes CreateActiveXControls before entering
-    // CDialogImplBaseT::DialogProc, so its nested COM callbacks need this
-    // outer frame to postpone WM_NCDESTROY finalization and thunk retirement.
-    static INT_PTR CALLBACK GuardedDialogProc(HWND object, UINT message,
-                                               WPARAM wParam, LPARAM lParam)
-    {
-        auto self = reinterpret_cast<CDialogImplBaseT<TBase>*>(object);
-        _ATL_MSG outer(self->m_hWnd, message, wParam, lParam);
-        const _ATL_MSG* previous = self->m_pCurrentMsg;
-        self->m_pCurrentMsg = &outer;
-        const INT_PTR result = self->GetDialogProc()(object, message, wParam, lParam);
-        ATLASSERT(self->m_pCurrentMsg == &outer);
-        self->m_pCurrentMsg = previous;
-        if ((self->m_dwState & CWindowImplRoot<TBase>::WINSTATE_DESTROYED) &&
-            self->m_pCurrentMsg == NULL) {
-            const HWND finalWindow = self->m_hWnd;
-            self->m_hWnd = NULL;
-            self->m_dwState &= ~CWindowImplRoot<TBase>::WINSTATE_DESTROYED;
-            self->OnFinalMessage(finalWindow);
-            // OnFinalMessage may destroy self; no access afterward.
-        }
-        return result;
-    }
-
     static INT_PTR CALLBACK DialogProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         CDialogImplBaseT<TBase>* pThis = (CDialogImplBaseT<TBase>*)hWnd;
-        // A custom WTL DialogProc can invoke this base *after* nested COM
-        // callbacks already retired the underlying native dialog. Never
-        // re-enter an application's WM_INITDIALOG on a destroyed HWND.
-        if (uMsg == WM_INITDIALOG &&
-            ((pThis->m_dwState & CWindowImplRoot<TBase>::WINSTATE_DESTROYED) ||
-             !pThis->m_hWnd || !::IsWindow(pThis->m_hWnd)))
-            return FALSE;
         _ATL_MSG msg(pThis->m_hWnd, uMsg, wParam, lParam);
         const _ATL_MSG* pOldMsg = pThis->m_pCurrentMsg;
         pThis->m_pCurrentMsg = &msg;
