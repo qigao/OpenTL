@@ -137,6 +137,26 @@ See [native property frames](ATL_COMPATIBILITY.md#native-property-frames).
 Simple sink handlers currently return void or HRESULT; the complete Automation
 return-value surface is not yet implemented.
 
+## Original WTL active-control keyboard forwarding
+
+The existing lifecycle fixture also exercises original WTL's control keyboard
+path through a real modeless wizard. Posted Win32 key messages pass through
+`PropSheet_IsDialogMessage`, the original page's `PreTranslateMessage`, and the
+focused host's `WM_FORWARDMSG` handler to a native `IOleInPlaceActiveObject`.
+A temporary native subclass observes the host's actual result: `S_OK` is
+consumed and `S_FALSE` is declined. The property sheet may still process a
+declined key itself, so its message-loop return is not used as a substitute
+for the active object's result.
+
+The cases check that a hidden ActiveX page does not receive the ordinary
+page's keys, and that Back navigation resumes forwarding without a second
+control initialization. An active object that calls `SetActiveObject(NULL)`
+inside its accelerator callback remains alive until that callback returns;
+later keys no longer reach it. The registered control's independent typed
+event connection continues to work and unadvises once at native teardown.
+This test-local WTL admission does not enable global implicit hosting or
+claim coverage of arbitrary application keymaps.
+
 ## Modeless property-sheet creation and forced teardown
 
 Native `PropertySheet` retains its own state while creating pages. A control
