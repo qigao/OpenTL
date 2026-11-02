@@ -871,6 +871,99 @@ inline HRESULT CWindow::GetDlgControl(int id, REFIID iid, void** output) noexcep
     const HRESULT hr = AtlAxGetControl(child, &control.p);
     return FAILED(hr) ? hr : control->QueryInterface(iid, output);
 }
+// Original WTL's CAxPropertyPageImpl calls this after it has created
+// ActiveX children. Keep ordinary ListBox/ComboBox DLGINIT in the Win32
+// controls; the original page separately consumes the ActiveX records.
+// Reuse the same bounded DLGINIT decoder used by the explicit host.
+inline BOOL CWindow::ExecuteDlgInit(UINT dialogId) noexcept {
+    if (!::IsWindow(m_hWnd)) {
+        ::SetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        return FALSE;
+    }
+    const HINSTANCE instance = _AtlBaseModule.GetResourceInstance();
+    const HRSRC entry = ::FindResourceW(instance, MAKEINTRESOURCEW(dialogId),
+                                       MAKEINTRESOURCEW(240));
+    if (!entry) {
+        const DWORD missing = ::GetLastError();
+        if (missing == ERROR_RESOURCE_NAME_NOT_FOUND ||
+            missing == ERROR_RESOURCE_TYPE_NOT_FOUND) {
+            ::SetLastError(ERROR_SUCCESS);
+            return TRUE;
+        }
+        return FALSE;
+    }
+    const DWORD length = ::SizeofResource(instance, entry);
+    const HGLOBAL resource = ::LoadResource(instance, entry);
+    const void* bytes = resource ? ::LockResource(resource) : nullptr;
+    if (!bytes || !length) {
+        ::SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    std::vector<detail::AxDialogInit> records;
+    const DWORD error = detail::ReadAxDialogInit(bytes, length, records);
+    if (error) {
+        ::SetLastError(error);
+        return FALSE;
+    }
+    struct PendingString {
+        HWND child;
+        UINT message;
+        std::wstring value;
+    };
+    std::vector<PendingString> pending;
+    try {
+        for (const auto& record : records) {
+            if (!record.IsString()) continue;
+            const HWND child = ::GetDlgItem(m_hWnd, record.id);
+            WCHAR name[32]{};
+            const bool list = record.kind == detail::AxDialogInit::Kind::ListString;
+            if (!child || !::GetClassNameW(child, name, 32) ||
+                ::lstrcmpiW(name, list ? L"ListBox" : L"ComboBox")) {
+                ::SetLastError(ERROR_INVALID_DATA);
+                return FALSE;
+            }
+            const DWORD style = static_cast<DWORD>(::GetWindowLongPtrW(child, GWL_STYLE));
+            if ((list && (style & LBS_NODATA)) ||
+                (list && (style & (LBS_OWNERDRAWFIXED | LBS_OWNERDRAWVARIABLE)) &&
+                 !(style & LBS_HASSTRINGS)) ||
+                (!list && (style & (CBS_OWNERDRAWFIXED | CBS_OWNERDRAWVARIABLE)) &&
+                 !(style & CBS_HASSTRINGS))) {
+                ::SetLastError(ERROR_NOT_SUPPORTED);
+                return FALSE;
+            }
+            if (record.stream.empty() || record.stream.size() >
+                static_cast<size_t>((std::numeric_limits<int>::max)())) {
+                ::SetLastError(ERROR_INVALID_DATA);
+                return FALSE;
+            }
+            const int count = static_cast<int>(record.stream.size());
+            const char* source = reinterpret_cast<const char*>(record.stream.data());
+            const int converted = ::MultiByteToWideChar(CP_ACP, 0, source, count, nullptr, 0);
+            if (!converted) return FALSE;
+            PendingString item{child, list ? LB_ADDSTRING : CB_ADDSTRING,
+                               std::wstring(static_cast<size_t>(converted), L'\0')};
+            if (::MultiByteToWideChar(CP_ACP, 0, source, count,
+                                      &item.value[0], converted) != converted) return FALSE;
+            pending.push_back(std::move(item));
+        }
+    } catch (const std::bad_alloc&) {
+        ::SetLastError(ERROR_OUTOFMEMORY);
+        return FALSE;
+    } catch (...) {
+        ::SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    for (const auto& item : pending) {
+        const LRESULT result = ::SendMessageW(item.child, item.message, 0,
+                                              reinterpret_cast<LPARAM>(item.value.c_str()));
+        if (result == LB_ERR || result == LB_ERRSPACE) {
+            ::SetLastError(ERROR_WRITE_FAULT);
+            return FALSE;
+        }
+    }
+    ::SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
 inline HRESULT WINAPI AtlAxAttachControl(IUnknown* control, HWND window, IUnknown** output) noexcept {
     if (output) *output = nullptr;
     CComPtr<detail::AxHost> host;

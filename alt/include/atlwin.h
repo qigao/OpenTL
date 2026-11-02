@@ -923,6 +923,19 @@ public:
         return ::IsChild(m_hWnd, hWnd);
     }
 
+    // Original WTL property pages use dialog-unit conversion and DLGINIT.
+    // The resource parser/implementation is defined by atlhost.h, not by
+    // ordinary GUI headers, so non-COM UI never starts a hosting runtime.
+    BOOL MapDialogRect(LPRECT rectangle) const noexcept
+    {
+        if (!rectangle || !::IsWindow(m_hWnd)) {
+            ::SetLastError(ERROR_INVALID_WINDOW_HANDLE);
+            return FALSE;
+        }
+        return ::MapDialogRect(m_hWnd, rectangle);
+    }
+    BOOL ExecuteDlgInit(UINT dialogId) noexcept;
+
     // Dialog item
     HRESULT GetDlgControl(int nID, REFIID iid, void** output) noexcept;
 
