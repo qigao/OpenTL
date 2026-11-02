@@ -166,6 +166,25 @@ static int geometry() {
     const CRect expected(8, 17, 32, 43);
     if (!::InflateRect(rect, 2, 3) || !::EqualRect(rect, expected))
         return failure(86, "CRect_Win32_pointer_interoperation");
+
+    // Weasel FullScreen/Horizontal/Vertical layouts consume this exact ATL
+    // API. Keep the CSize/SIZE ABI unchanged, including zero/negative values.
+    CSize size;
+    if (size.cx != 0 || size.cy != 0)
+        return failure(87, "CSize_default_zero");
+    size.SetSize(237, 180);
+    const SIZE& native = size;
+    if (native.cx != 237 || native.cy != 180 || sizeof(CSize) != sizeof(SIZE))
+        return failure(88, "CSize_SetSize_native_SIZE_ABI");
+    const CRect fromSize(POINT{10, 20}, size);
+    if (fromSize.Width() != 237 || fromSize.Height() != 180)
+        return failure(89, "CSize_SetSize_CRect_consumer");
+    size.SetSize(-7, 0);
+    if (size.cx != -7 || size.cy != 0)
+        return failure(90, "CSize_SetSize_signed_and_zero");
+    size.SetSize(0, -1);
+    if (size.cx != 0 || size.cy != -1)
+        return failure(91, "CSize_SetSize_repeat");
     return 0;
 }
 struct TemporaryFile {
