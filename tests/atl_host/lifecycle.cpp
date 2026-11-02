@@ -1201,9 +1201,15 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID re
     OriginalWtlAxPage page;
     REQUIRE(page.m_psp.dwFlags & PSP_DLGINDIRECT);
     REQUIRE(page.m_psp.pResource != nullptr);
+    // The second page is ordinary, unmodified WTL. Navigation must remain
+    // native Windows PSM_* state, not a parallel property-sheet implementation.
+    WTL::CPropertyPage<602> ordinary;
     WTL::CPropertySheet sheet(L"Original WTL ActiveX page");
     HPROPSHEETPAGE pageHandle = page.Create();
     REQUIRE(pageHandle != nullptr && sheet.AddPage(pageHandle));
+    HPROPSHEETPAGE ordinaryHandle = ordinary.Create();
+    REQUIRE(ordinaryHandle != nullptr && sheet.AddPage(ordinaryHandle));
+    REQUIRE(sheet.GetPageCount() == 2);
     HWND sheetWindow = sheet.Create(nullptr);
     REQUIRE(sheetWindow && ::IsWindow(sheetWindow));
     // Modeless property sheets can defer page activation. Ask the native
@@ -1235,9 +1241,26 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID re
     ATL::CComPtr<IOleObject> object;
     REQUIRE(control.QueryControl(IID_IOleObject, reinterpret_cast<void**>(&object)) == S_OK);
     REQUIRE(state.activated == 1 && state.loaded == 1 && state.siteOrder);
+    // Navigate to the ordinary page, then return. The first ActiveX control
+    // must not be detached, reinitialized, or leaked merely by page switching.
+    REQUIRE(::SendMessageW(sheetWindow, PSM_SETCURSEL, 1, 0));
+    const HWND ordinaryWindow = reinterpret_cast<HWND>(
+        ::SendMessageW(sheetWindow, PSM_GETCURRENTPAGEHWND, 0, 0));
+    REQUIRE(ordinaryWindow && ::IsWindow(ordinaryWindow) &&
+            ordinaryWindow == ordinary.m_hWnd &&
+            ordinaryWindow != page.m_hWnd &&
+            state.activated == 1 && !state.closed);
+    REQUIRE(::SendMessageW(sheetWindow, PSM_SETCURSEL, 0, 0));
+    REQUIRE(reinterpret_cast<HWND>(
+                ::SendMessageW(sheetWindow, PSM_GETCURRENTPAGEHWND, 0, 0)) ==
+                page.m_hWnd &&
+            ::IsWindow(page.m_hWnd) &&
+            page.initialized == 1 && page.createCalls == 1 &&
+            state.activated == 1 && state.loaded == 1 && !state.closed);
     object.Release();
     REQUIRE(::DestroyWindow(sheetWindow));
-    REQUIRE(page.destroyed == 1 && state.closed == 1 &&
+    REQUIRE(!page.m_hWnd && !ordinary.m_hWnd &&
+            page.destroyed == 1 && state.closed == 1 &&
             state.destroyed == 1 && module.GetLockCount() == 0);
     return true;
 }
