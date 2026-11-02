@@ -1202,7 +1202,8 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID re
     if (!pageReady) {
         std::fprintf(stderr,
             "WTL_AX_PAGE_FAIL selection=%lld native_page=%p bound_page=%p initialized=%d"
-            " create_calls=%d create_hr=%08lx activated=%d loaded=%d inits=%d last_error=%lu\n",
+            " page_count=%d active=%d create_calls=%d create_hr=%08lx"
+            " activated=%d loaded=%d inits=%d last_error=%lu\n",
             static_cast<long long>(selection), static_cast<void*>(nativePage),
             static_cast<void*>(page.m_hWnd), page.initialized,
             sheet.GetPageCount(), sheet.GetActiveIndex(),
