@@ -1315,8 +1315,24 @@ bool originalWtlAxPageFailedInit(ControlState& state, ATL::CAtlModule& module,
         state.closed == 1 && state.destroyed == 1 &&
         module.GetLockCount() == 0;
     const BOOL destroyed = ::DestroyWindow(window);
-    REQUIRE(rejected && destroyed && page.destroyed == 1 &&
-            !page.m_hWnd && module.GetLockCount() == 0);
+    const bool retired = destroyed && page.destroyed == 1 &&
+                         !page.m_hWnd && module.GetLockCount() == 0;
+    if (!rejected || !retired) {
+        std::fprintf(stderr,
+            "WTL_AX_FAILED_INIT_TRACE rejected=%d retired=%d destroyed=%d"
+            " native_page=%p bound_page=%p child=%p query=%08lx"
+            " create_calls=%d create_hr=%08lx init=%d destroy_callback=%d"
+            " loaded=%d activated=%d closed=%d control_destroyed=%d"
+            " module_lock=%ld last_error=%lu\n",
+            rejected, retired, destroyed, static_cast<void*>(current),
+            static_cast<void*>(page.m_hWnd), static_cast<void*>(child),
+            static_cast<unsigned long>(query), page.createCalls,
+            static_cast<unsigned long>(page.createResult), page.initialized,
+            page.destroyed, state.loaded, state.activated, state.closed,
+            state.destroyed, static_cast<long>(module.GetLockCount()),
+            ::GetLastError());
+    }
+    REQUIRE(rejected && retired);
     return true;
 }
 bool resourceInitialization() {
