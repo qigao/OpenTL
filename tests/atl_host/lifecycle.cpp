@@ -1301,6 +1301,37 @@ public:
     int OnWizardNext() { ++wizardNext; return vetoWizardNext ? -1 : 0; }
     bool expectedCreateFailure = false;
     ControlState* traceState = nullptr;
+    // When probing forced teardown, wrap only this fixture's native WTL
+    // callback to see whether destruction escapes its outer DLGPROC or
+    // happens afterward in the Windows PropertySheet creation stack.
+    DLGPROC GetDialogProc() override {
+        return traceState ? &OriginalWtlAxPage::TraceDialogProc :
+            WTL::CAxPropertyPageImpl<OriginalWtlAxPage>::GetDialogProc();
+    }
+    static INT_PTR CALLBACK TraceDialogProc(HWND object, UINT message, WPARAM w, LPARAM l) {
+        auto base = reinterpret_cast<WTL::CAxPropertyPageImpl<OriginalWtlAxPage>*>(object);
+        auto self = static_cast<OriginalWtlAxPage*>(base);
+        if (message == WM_INITDIALOG || message == WM_DESTROY || message == WM_NCDESTROY)
+            TraceWizardReentry(*self->traceState, message == WM_INITDIALOG ?
+                "WTL.DLGPROC.WM_INITDIALOG.enter" : message == WM_DESTROY ?
+                "WTL.DLGPROC.WM_DESTROY.enter" : "WTL.DLGPROC.WM_NCDESTROY.enter", self->m_hWnd);
+        const INT_PTR result = WTL::CAxPropertyPageImpl<OriginalWtlAxPage>::DialogProc(object, message, w, l);
+        if (message == WM_INITDIALOG || message == WM_DESTROY || message == WM_NCDESTROY)
+            TraceWizardReentry(*self->traceState, message == WM_INITDIALOG ?
+                "WTL.DLGPROC.WM_INITDIALOG.return" : message == WM_DESTROY ?
+                "WTL.DLGPROC.WM_DESTROY.return" : "WTL.DLGPROC.WM_NCDESTROY.return", self->m_hWnd);
+        return result;
+    }
+    bool OnPageCreate() {
+        if (traceState) TraceWizardReentry(*traceState, "WTL.PropPageCallback.create");
+        return true;
+    }
+    void OnPageRelease() {
+        if (traceState) TraceWizardReentry(*traceState, "WTL.PropPageCallback.release");
+    }
+    void OnFinalMessage(HWND window) override {
+        if (traceState) TraceWizardReentry(*traceState, "ATL.OnFinalMessage", window);
+    }
     HRESULT createResult = E_UNEXPECTED;
     HRESULT CreateActiveXControls(UINT id) override {
         if (traceState) TraceWizardReentry(*traceState, "WTL.CreateActiveXControls.enter", m_hWnd);
