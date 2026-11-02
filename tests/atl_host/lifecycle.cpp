@@ -1364,7 +1364,7 @@ public:
 };
 // PropertySheet may post the button action. Drive only actual Win32 messages;
 // never call the WTL OnWizard* callbacks directly or use arbitrary sleeps.
-bool NativeWizardSelected(HWND sheet, HWND expected) {
+bool NativeWizardSelected(HWND sheet, const HWND& expected) {
     for (int i = 0; i != 128; ++i) {
         const HWND current = reinterpret_cast<HWND>(
             ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0));
@@ -1375,7 +1375,7 @@ bool NativeWizardSelected(HWND sheet, HWND expected) {
             ::PostQuitMessage(static_cast<int>(message.wParam));
             return false;
         }
-        if (!::PropSheet_IsDialogMessage(sheet, &message)) {
+        if (!PropSheet_IsDialogMessage(sheet, &message)) {
             ::TranslateMessage(&message);
             ::DispatchMessageW(&message);
         }
