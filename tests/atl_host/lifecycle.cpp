@@ -1656,7 +1656,7 @@ bool originalWtlWizardCancelDuringLoad(ControlState& state,
             " returned=%p live=%d create_calls=%d create_hr=%08lx"
             " app_init=%d page_destroyed=%d page_hwnd=%p"
             " loaded=%d activated=%d closed=%d detached=%d"
-            " control_destroyed=%d module_lock=%ld\\n",
+            " control_destroyed=%d module_lock=%ld\n",
             state.wizardCancelRequests, state.wizardCancelSucceeded,
             static_cast<void*>(created), returnedLive, page.createCalls,
             static_cast<unsigned long>(page.createResult),
