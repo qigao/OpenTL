@@ -1153,7 +1153,7 @@ public:
 // modeless Windows property sheet, not the ATL CAxDialogImpl substitute.
 class OriginalWtlAxPage : public WTL::CAxPropertyPageImpl<OriginalWtlAxPage> {
 public:
-    enum { IDD = 610 };
+    enum { IDD = 665 };
     int initialized = 0, destroyed = 0, createCalls = 0;
     HRESULT createResult = E_UNEXPECTED;
     HRESULT CreateActiveXControls(UINT id) override {
@@ -1241,6 +1241,20 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID re
     ATL::CComPtr<IOleObject> object;
     REQUIRE(control.QueryControl(IID_IOleObject, reinterpret_cast<void**>(&object)) == S_OK);
     REQUIRE(state.activated == 1 && state.loaded == 1 && state.siteOrder);
+    // Original WTL's OnInitDialog must execute ordinary DLGINIT only once,
+    // alongside the independently persisted ActiveX IStream record.
+    const HWND list = ::GetDlgItem(page.m_hWnd, 715);
+    const HWND combo = ::GetDlgItem(page.m_hWnd, 716);
+    WCHAR listText[32]{}, comboText[32]{};
+    REQUIRE(list && combo &&
+            ::SendMessageW(list, LB_GETCOUNT, 0, 0) == 1 &&
+            ::SendMessageW(combo, CB_GETCOUNT, 0, 0) == 1 &&
+            ::SendMessageW(list, LB_GETTEXT, 0,
+                reinterpret_cast<LPARAM>(listText)) == 5 &&
+            ::SendMessageW(combo, CB_GETLBTEXT, 0,
+                reinterpret_cast<LPARAM>(comboText)) == 5 &&
+            !::wcscmp(listText, L"alpha") &&
+            !::wcscmp(comboText, L"bravo"));
     // Navigate to the ordinary page, then return. The first ActiveX control
     // must not be detached, reinitialized, or leaked merely by page switching.
     REQUIRE(::SendMessageW(sheetWindow, PSM_SETCURSEL, 1, 0));
@@ -1256,7 +1270,9 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID re
                 page.m_hWnd &&
             ::IsWindow(page.m_hWnd) &&
             page.initialized == 1 && page.createCalls == 1 &&
-            state.activated == 1 && state.loaded == 1 && !state.closed);
+            state.activated == 1 && state.loaded == 1 && !state.closed &&
+            ::SendMessageW(list, LB_GETCOUNT, 0, 0) == 1 &&
+            ::SendMessageW(combo, CB_GETCOUNT, 0, 0) == 1);
     object.Release();
     REQUIRE(::DestroyWindow(sheetWindow));
     REQUIRE(!page.m_hWnd && !ordinary.m_hWnd &&
