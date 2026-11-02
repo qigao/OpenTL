@@ -610,9 +610,27 @@ bool authoredPropertyPages() {
         page->GetPageInfo(&again)==S_OK && info.cb==sizeof(info) && info.pszTitle &&
         !info.pszTitle[0] && info.pszTitle!=again.pszTitle && info.size.cx==180 && info.size.cy==90);
     ::CoTaskMemFree(info.pszTitle); ::CoTaskMemFree(again.pszTitle);
+    authored->m_dwTitle=6901; authored->m_dwDocString=6902;
+    authored->m_dwHelpFile=6903; authored->m_dwHelpContext=12345;
+    info={}; again={};
+    CHECK(page->GetPageInfo(&info)==S_OK && page->GetPageInfo(&again)==S_OK &&
+        info.dwHelpContext==12345 && info.pszTitle && info.pszDocString && info.pszHelpFile &&
+        !::wcscmp(info.pszTitle,L"OpenWTL authored page") &&
+        !::wcscmp(info.pszDocString,L"Native property metadata") &&
+        !::wcscmp(info.pszHelpFile,L"openwtl-help.chm") &&
+        info.pszTitle!=again.pszTitle && info.pszDocString!=again.pszDocString &&
+        info.pszHelpFile!=again.pszHelpFile);
+    info.pszTitle[0]=L'X'; info.pszDocString[0]=L'X'; info.pszHelpFile[0]=L'X';
+    CHECK(again.pszTitle[0]==L'O' && again.pszDocString[0]==L'N' && again.pszHelpFile[0]==L'o');
+    ::CoTaskMemFree(info.pszTitle); ::CoTaskMemFree(info.pszDocString); ::CoTaskMemFree(info.pszHelpFile);
+    ::CoTaskMemFree(again.pszTitle); ::CoTaskMemFree(again.pszDocString); ::CoTaskMemFree(again.pszHelpFile);
     authored->m_dwDocString=65535; info={};
-    CHECK(page->GetPageInfo(&info)==HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND) && !info.pszTitle && !info.cb);
-    authored->m_dwDocString=0;
+    CHECK(page->GetPageInfo(&info)==HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND) &&
+        !info.pszTitle && !info.pszDocString && !info.pszHelpFile && !info.cb);
+    authored->m_dwDocString=0; authored->m_dwHelpFile=65535; info={};
+    CHECK(page->GetPageInfo(&info)==HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND) &&
+        !info.pszTitle && !info.pszDocString && !info.pszHelpFile && !info.cb);
+    authored->m_dwTitle=0; authored->m_dwDocString=0; authored->m_dwHelpFile=0; authored->m_dwHelpContext=0;
     CHECK(page->Move(&rect)==E_UNEXPECTED && page->Deactivate()==E_UNEXPECTED && page->IsPageDirty()==S_FALSE);
     for (int cycle=0;cycle<2;++cycle) {
         const RECT overflow{(std::numeric_limits<LONG>::min)(),0,(std::numeric_limits<LONG>::max)(),90};

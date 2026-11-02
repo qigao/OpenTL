@@ -1213,3 +1213,18 @@ object-array replacement, Apply failure/success, checked rectangle bounds and
 site callback final-reference release. This candidate does not qualify native
 OleCreatePropertyFrame integration, help dispatch, per-property selection or
 locale handling. #95 remains open until its remaining acceptance is complete.
+
+### Authored pages in the native property frame (qualification pending)
+
+The existing native OLE property-frame fixture now authors its registered page
+with the production IPropertyPage2Impl/CDialogImpl implementation. Windows still
+owns OleCreatePropertyFrame and its modal loop. The existing scenarios retain
+actual IOleObject edits, Apply versus Cancel, repeated frame opening, owner
+state, explicit French site LCID, reentrant ShowPropertyFrame rejection and
+site/object/window cleanup counters. There is no second property-frame engine.
+
+Direct page-info cases load nonzero title/doc/help resource IDs, verify copied
+strings are independent, and verify cleanup when a later resource field fails.
+The native frame uses the same repository-owned metadata resources. These are
+pending native execution; successful site-LCID propagation does not establish
+locale-specific resource selection, font/template size inference or help UI.

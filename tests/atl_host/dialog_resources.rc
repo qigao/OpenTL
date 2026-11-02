@@ -646,3 +646,11 @@ BEGIN
     711, 0x401, 6, 0, 0x6c61, 0x6870, 0x0061
     0
 END
+
+// Repository-owned property-page metadata, shared by direct and native-frame cases.
+STRINGTABLE
+BEGIN
+    6901 L"OpenWTL authored page"
+    6902 L"Native property metadata"
+    6903 L"openwtl-help.chm"
+END

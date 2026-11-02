@@ -537,95 +537,93 @@ struct Registration {
 };
 // Windows owns the property frame and its modal loop. The registered page is
 // repository-owned test UI; native SetObjects/Apply perform an actual COM edit.
-class PropertyPage : public IPropertyPage {
+class PropertyPage : public ATL::CDialogImpl<PropertyPage>, public ATL::IPropertyPage2Impl<PropertyPage> {
+    using Base = ATL::IPropertyPage2Impl<PropertyPage>;
 public:
-    explicit PropertyPage(PropertyState& state) : state_(state) { ++state_.created; }
+    enum { IDD = 602 };
+    explicit PropertyPage(PropertyState& state) : state_(state) {
+        ++state_.created;
+        m_size = {220,80};
+        m_dwTitle = 6901; m_dwDocString = 6902; m_dwHelpFile = 6903;
+    }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) override {
         if (!output) return E_POINTER; *output = nullptr;
-        if (iid != IID_IUnknown && iid != IID_IPropertyPage) return E_NOINTERFACE;
-        *output = static_cast<IPropertyPage*>(this); AddRef(); return S_OK;
+        if (iid != IID_IUnknown && iid != IID_IPropertyPage && iid != IID_IPropertyPage2) return E_NOINTERFACE;
+        *output = static_cast<IPropertyPage2*>(this); AddRef(); return S_OK;
     }
     ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
     ULONG STDMETHODCALLTYPE Release() override { const auto count = --refs_; if (!count) delete this; return count; }
     HRESULT STDMETHODCALLTYPE SetPageSite(IPropertyPageSite* site) override {
-        if (site && site_) return E_UNEXPECTED;
-        if (site) ++state_.sites; else if (site_) ++state_.clearedSites;
-        site_ = site; return S_OK;
+        ATL::CComPtr<IPropertyPage> protect(this);
+        const bool hadSite = m_pPageSite != nullptr;
+        const HRESULT hr = Base::SetPageSite(site);
+        if (hr == S_OK) {
+            if (site) ++state_.sites;
+            else if (hadSite) ++state_.clearedSites;
+        }
+        return hr;
     }
     HRESULT STDMETHODCALLTYPE Activate(HWND parent, LPCRECT rect, BOOL modal) override {
-        if (!rect) return E_POINTER;
-        if (window_ || !site_ || !object_) return E_UNEXPECTED;
+        ATL::CComPtr<IPropertyPage> protect(this);
         state_.good = state_.good && modal && ::IsWindow(parent);
-        window_ = ::CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-            rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top,
-            parent, nullptr, ATL::_AtlBaseModule.GetModuleInstance(), nullptr);
-        if (!window_) return E_OUTOFMEMORY;
-        ::SetWindowLongPtrW(window_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+        HRESULT hr = Base::Activate(parent,rect,modal);
+        if (FAILED(hr)) return hr;
+        ::SetWindowLongPtrW(m_hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
         const HWND edit = ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"9", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER,
-            8, 8, 100, 24, window_, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(771)), ATL::_AtlBaseModule.GetModuleInstance(), nullptr);
-        if (!edit) { ::DestroyWindow(window_); window_ = nullptr; return E_OUTOFMEMORY; }
+            8, 8, 100, 24, m_hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(771)), ATL::_AtlBaseModule.GetModuleInstance(), nullptr);
+        if (!edit) { (void)Base::Deactivate(); return E_OUTOFMEMORY; }
         ++state_.activated; return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Deactivate() override {
-        if (window_) { ::DestroyWindow(window_); window_ = nullptr; ++state_.deactivated; }
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE GetPageInfo(PROPPAGEINFO* info) override {
-        if (!info) return E_POINTER;
-        *info = {}; info->cb = sizeof(*info); info->size = {220, 80};
-        const WCHAR title[] = L"OpenWTL native page";
-        info->pszTitle = static_cast<LPOLESTR>(::CoTaskMemAlloc(sizeof(title)));
-        if (!info->pszTitle) return E_OUTOFMEMORY;
-        std::memcpy(info->pszTitle, title, sizeof(title)); return S_OK;
+        ATL::CComPtr<IPropertyPage> protect(this);
+        const HRESULT hr = Base::Deactivate();
+        if (hr == S_OK) ++state_.deactivated;
+        return hr;
     }
     HRESULT STDMETHODCALLTYPE SetObjects(ULONG count, IUnknown** objects) override {
+        ATL::CComPtr<IPropertyPage> protect(this);
         if (!count) {
-            if (object_) ++state_.unbound;
-            object_.Release(); return S_OK;
+            const HRESULT hr = Base::SetObjects(0,nullptr);
+            if (hr == S_OK && object_) { object_.Release(); ++state_.unbound; }
+            return hr;
         }
         if (count != 1 || !objects || !objects[0] || object_) return E_INVALIDARG;
         ATL::CComPtr<IUnknown> identity;
         HRESULT hr = objects[0]->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity));
         if (FAILED(hr)) return hr;
         state_.good = state_.good && identity.p == state_.identity;
-        hr = objects[0]->QueryInterface(IID_IOleObject, reinterpret_cast<void**>(&object_));
-        if (SUCCEEDED(hr)) ++state_.bound;
+        ATL::CComPtr<IOleObject> staged;
+        hr = objects[0]->QueryInterface(IID_IOleObject, reinterpret_cast<void**>(&staged));
+        if (FAILED(hr)) return hr;
+        hr = Base::SetObjects(count,objects);
+        if (hr == S_OK) { object_.Attach(staged.Detach()); ++state_.bound; }
         return hr;
     }
     HRESULT STDMETHODCALLTYPE Show(UINT command) override {
-        if (!window_) return E_UNEXPECTED;
-        if (command != SW_SHOW && command != SW_SHOWNORMAL && command != SW_HIDE) return E_INVALIDARG;
-        ::ShowWindow(window_, command);
+        ATL::CComPtr<IPropertyPage> protect(this);
+        const HRESULT hr = Base::Show(command);
+        if (FAILED(hr)) return hr;
         if (command != SW_HIDE && !posted_) {
             posted_ = true; ++state_.shown;
-            // Editing is a user action after native frame construction. Do not
-            // send dirty notifications from inside its initialization stack.
-            if (!::SetTimer(window_, 1, 10, EditTimer)) {
-                state_.good = false; ::PostMessageW(::GetAncestor(window_, GA_ROOT), WM_CLOSE, 0, 0);
+            // Editing starts after the native modal frame has completed setup.
+            if (!::SetTimer(m_hWnd, 1, 10, EditTimer)) {
+                state_.good = false; ::PostMessageW(::GetAncestor(m_hWnd, GA_ROOT), WM_CLOSE, 0, 0);
             }
         }
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE Move(LPCRECT rect) override {
-        if (!rect) return E_POINTER;
-        if (window_) ::MoveWindow(window_, rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top, TRUE);
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE IsPageDirty() override { return dirty_ ? S_OK : S_FALSE; }
-    HRESULT STDMETHODCALLTYPE Apply() override {
-        if (!window_ || !object_) return E_UNEXPECTED;
-        BOOL valid = FALSE;
-        SIZEL value{static_cast<LONG>(::GetDlgItemInt(window_, 771, &valid, FALSE)), 1};
-        if (!valid) return E_FAIL;
-        const HRESULT hr = object_->SetExtent(DVASPECT_CONTENT, &value);
-        if (SUCCEEDED(hr)) { dirty_ = false; ++state_.applied; }
         return hr;
     }
-    HRESULT STDMETHODCALLTYPE Help(LPCOLESTR) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE TranslateAccelerator(MSG* message) override {
-        if (!message) return E_POINTER;
-        return window_ && ::IsDialogMessageW(window_, message) ? S_OK : S_FALSE;
+    HRESULT STDMETHODCALLTYPE Apply() override {
+        ATL::CComPtr<IPropertyPage> protect(this);
+        if (!::IsWindow(m_hWnd) || !object_) return E_UNEXPECTED;
+        BOOL valid = FALSE;
+        SIZEL value{static_cast<LONG>(::GetDlgItemInt(m_hWnd, 771, &valid, FALSE)), 1};
+        if (!valid) return E_FAIL;
+        const HRESULT hr = object_->SetExtent(DVASPECT_CONTENT, &value);
+        if (SUCCEEDED(hr)) { SetDirty(FALSE); ++state_.applied; }
+        return hr;
     }
+    BEGIN_MSG_MAP(PropertyPage)
+    END_MSG_MAP()
 private:
     static void CALLBACK EditTimer(HWND window, UINT, UINT_PTR id, DWORD) {
         ::KillTimer(window, id);
@@ -633,15 +631,16 @@ private:
         if (page) page->EditAndFinish();
     }
     void EditAndFinish() {
+        ATL::CComPtr<IPropertyPage> protect(this);
         LCID locale = 0;
-        state_.good = site_->GetLocaleID(&locale) == S_OK && locale == state_.locale && state_.good;
-        state_.good = ::SetDlgItemInt(window_, 771, 314, FALSE) && state_.good;
-        dirty_ = true; state_.good = site_->OnStatusChange(PROPPAGESTATUS_DIRTY) == S_OK && state_.good;
+        state_.good = m_pPageSite && m_pPageSite->GetLocaleID(&locale) == S_OK && locale == state_.locale && state_.good;
+        state_.good = ::SetDlgItemInt(m_hWnd, 771, 314, FALSE) && state_.good;
+        SetDirty(TRUE); state_.good = IsPageDirty() == S_OK && state_.good;
         if (state_.reenter) {
             ++state_.nested;
             state_.good = state_.site->ShowPropertyFrame() == E_UNEXPECTED && state_.good;
         }
-        const HWND frame = ::GetAncestor(window_, GA_ROOT);
+        const HWND frame = ::GetAncestor(m_hWnd, GA_ROOT);
         state_.good = ::GetAncestor(frame, GA_ROOTOWNER) == state_.owner && state_.good;
         WCHAR caption[128]{};
         state_.good = ::GetWindowTextW(frame, caption, 128) > 0 && state_.good;
@@ -655,19 +654,20 @@ private:
         }
     }
     ~PropertyPage() {
-        // Native containers can clear these explicitly or release the page
-        // itself. Count the actual owned-reference releases in either path.
+        // The native frame must retire its page HWND before the final Release.
+        state_.good = !::IsWindow(m_hWnd) && state_.good;
         if (object_) { object_.Release(); ++state_.unbound; }
-        if (site_) { site_.Release(); ++state_.clearedSites; }
-        if (::IsWindow(window_)) ::DestroyWindow(window_);
+        if (m_pPageSite) ++state_.clearedSites; // Base releases the site below.
+        if (m_nObjects) {
+            // Base owns its independent SetObjects references and releases them.
+            state_.good = m_nObjects == 1 && state_.good;
+        }
         ++state_.destroyed;
     }
     ULONG refs_ = 1;
     PropertyState& state_;
-    ATL::CComPtr<IPropertyPageSite> site_;
     ATL::CComPtr<IOleObject> object_;
-    HWND window_ = nullptr;
-    bool dirty_ = false, posted_ = false;
+    bool posted_ = false;
 };
 class PageFactory : public IClassFactory {
 public:
