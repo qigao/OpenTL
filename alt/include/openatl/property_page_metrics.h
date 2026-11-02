@@ -33,9 +33,6 @@ inline DWORD ReadPropertyPageTemplateMetrics(const void* data, SIZE_T size,
         reader.position = 0;
         if (!reader.Read(parsed.style) || !reader.Skip(4)) return ERROR_INVALID_DATA;
     }
-    // Fixed-system-font and shell-font substitution policies need their own
-    // native oracle cases; do not silently measure them with SYSTEM_FONT.
-    if (parsed.style & DS_FIXEDSYS) return ERROR_NOT_SUPPORTED;
     if (!reader.Read(count) || !reader.Skip(4) || !reader.Read(parsed.cx) || !reader.Read(parsed.cy) ||
         parsed.cx <= 0 || parsed.cy <= 0) return ERROR_INVALID_DATA;
     DialogTemplateReader::Field menu, windowClass, title, font;
@@ -57,6 +54,11 @@ inline DWORD ReadPropertyPageTemplateMetrics(const void* data, SIZE_T size,
         if (bytes <= sizeof(WCHAR)) return ERROR_INVALID_DATA;
         if (bytes > sizeof(parsed.face)) return ERROR_NOT_SUPPORTED;
         std::memcpy(parsed.face,reader.bytes + font.begin,bytes);
+        // DS_SHELLFONT combines SETFONT and FIXEDSYS. Admit its documented
+        // MS Shell Dlg mapping; other face/style combinations remain explicit.
+        if ((parsed.style & DS_FIXEDSYS) &&
+            ::CompareStringOrdinal(parsed.face,-1,L"MS Shell Dlg",-1,TRUE)!=CSTR_EQUAL)
+            return ERROR_NOT_SUPPORTED;
     }
     parsed.headerBytes = reader.position;
     output = parsed;
@@ -69,35 +71,44 @@ inline HRESULT PropertyPageDialogSize(const void* data, SIZE_T size, SIZE& outpu
     const DWORD parsed = ReadPropertyPageTemplateMetrics(data,size,metrics);
     if (parsed != ERROR_SUCCESS) return HRESULT_FROM_WIN32(parsed);
     int baseX = 0, baseY = 0;
-    if (!metrics.hasFont) {
+    if (!metrics.hasFont && !(metrics.style & DS_FIXEDSYS)) {
         const LONG units = ::GetDialogBaseUnits();
         baseX = LOWORD(units); baseY = HIWORD(units);
     } else {
-        // LOGPIXELSY is a system/current-context measurement, not a promise
-        // about a future per-monitor parent. No Windows 10 import is required.
         HDC dc = ::GetDC(nullptr);
         if (!dc) return E_FAIL;
-        const int dpi = ::GetDeviceCaps(dc,LOGPIXELSY);
-        LOGFONTW description{};
-        const int height = dpi > 0 ? ::MulDiv(metrics.pointSize,dpi,72) : 0;
-        if (height <= 0) { ::ReleaseDC(nullptr,dc); return E_INVALIDARG; }
-        description.lfHeight = -height;
-        description.lfWeight = FW_NORMAL;
-        description.lfItalic = metrics.italic;
-        description.lfCharSet = metrics.charset;
-        std::memcpy(description.lfFaceName,metrics.face,sizeof(metrics.face));
-        HFONT font = ::CreateFontIndirectW(&description);
+        HFONT font = nullptr;
+        const bool owned = metrics.hasFont;
+        if (owned) {
+            // LOGPIXELSY is system/current-context DPI, not the DPI of a
+            // future per-monitor parent. No Windows 10 import is required.
+            const int dpi = ::GetDeviceCaps(dc,LOGPIXELSY);
+            LOGFONTW description{};
+            const int height = dpi > 0 ? ::MulDiv(metrics.pointSize,dpi,72) : 0;
+            if (height <= 0) { ::ReleaseDC(nullptr,dc); return E_INVALIDARG; }
+            description.lfHeight = -height;
+            description.lfWeight = FW_NORMAL;
+            description.lfItalic = metrics.italic;
+            description.lfCharSet = metrics.charset;
+            std::memcpy(description.lfFaceName,metrics.face,sizeof(metrics.face));
+            font = ::CreateFontIndirectW(&description);
+        } else {
+            // A FIXEDSYS dialog without SETFONT uses this borrowed stock
+            // font, rather than the SYSTEM_FONT behind GetDialogBaseUnits.
+            font = reinterpret_cast<HFONT>(::GetStockObject(SYSTEM_FIXED_FONT));
+        }
         if (!font) { ::ReleaseDC(nullptr,dc); return E_OUTOFMEMORY; }
         HGDIOBJ old = ::SelectObject(dc,font);
         if (!old || old == HGDI_ERROR) {
-            ::DeleteObject(font); ::ReleaseDC(nullptr,dc); return E_FAIL;
+            if (owned) ::DeleteObject(font);
+            ::ReleaseDC(nullptr,dc); return E_FAIL;
         }
         TEXTMETRICW text{};
         SIZE alphabet{};
         const BOOL measured = ::GetTextMetricsW(dc,&text) &&
             ::GetTextExtentPoint32W(dc,L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",52,&alphabet);
         ::SelectObject(dc,old);
-        ::DeleteObject(font);
+        if (owned) ::DeleteObject(font);
         ::ReleaseDC(nullptr,dc);
         if (!measured || text.tmHeight <= 0 || alphabet.cx <= 0) return E_FAIL;
         const LONGLONG average = (static_cast<LONGLONG>(alphabet.cx) + 26) / 52;

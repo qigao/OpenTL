@@ -288,6 +288,9 @@ struct PropertyState {
     bool empty = false, malformed = false, destroyOnQuery = false, destroyOnPages = false;
     bool cancel = false, captionFailure = false, good = true, reenter = true;
     bool useMap = false;
+    bool selectProperty = false, selectedFocus = false;
+    DISPID selectedProperty = DISPID_UNKNOWN;
+    int selections = 0, focusObserved = -1;
     int queried = 0, captions = 0, created = 0, destroyed = 0, sites = 0, clearedSites = 0;
     int bound = 0, unbound = 0, activated = 0, deactivated = 0, shown = 0, applied = 0, nested = 0;
     LONG value = 9;
@@ -569,10 +572,17 @@ public:
         HRESULT hr = Base::Activate(parent,rect,modal);
         if (FAILED(hr)) return hr;
         ::SetWindowLongPtrW(m_hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+        // Two tab stops make initial-property focus distinguishable from the
+        // dialog manager simply choosing its first edit control.
+        const HWND alternate = ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"alternate", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            8, 38, 100, 24, m_hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(772)), ATL::_AtlBaseModule.GetModuleInstance(), nullptr);
+        if (!alternate) { (void)Base::Deactivate(); return E_OUTOFMEMORY; }
         const HWND edit = ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"9", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER,
             8, 8, 100, 24, m_hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(771)), ATL::_AtlBaseModule.GetModuleInstance(), nullptr);
         if (!edit) { (void)Base::Deactivate(); return E_OUTOFMEMORY; }
-        ++state_.activated; return S_OK;
+        ++state_.activated;
+        if (requested_ != DISPID_UNKNOWN) return FocusRequestedProperty();
+        return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Deactivate() override {
         ATL::CComPtr<IPropertyPage> protect(this);
@@ -603,6 +613,10 @@ public:
         ATL::CComPtr<IPropertyPage> protect(this);
         const HRESULT hr = Base::Show(command);
         if (FAILED(hr)) return hr;
+        if (command != SW_HIDE && requested_ != DISPID_UNKNOWN) {
+            const HRESULT focused = FocusRequestedProperty();
+            if (FAILED(focused)) return focused;
+        }
         if (command != SW_HIDE && !posted_) {
             posted_ = true; ++state_.shown;
             // Editing starts after the native modal frame has completed setup.
@@ -611,6 +625,13 @@ public:
             }
         }
         return hr;
+    }
+    HRESULT STDMETHODCALLTYPE EditProperty(DISPID member) override {
+        ATL::CComPtr<IPropertyPage> protect(this);
+        if (!state_.selectProperty) return Base::EditProperty(member);
+        if (member != 1 && member != 2) return DISP_E_MEMBERNOTFOUND;
+        requested_ = member; state_.selectedProperty = member; ++state_.selections;
+        return ::IsWindow(m_hWnd) ? FocusRequestedProperty() : S_OK;
     }
     HRESULT STDMETHODCALLTYPE Apply() override {
         ATL::CComPtr<IPropertyPage> protect(this);
@@ -625,6 +646,16 @@ public:
     BEGIN_MSG_MAP(PropertyPage)
     END_MSG_MAP()
 private:
+    HRESULT FocusRequestedProperty() {
+        const HWND field = ::GetDlgItem(m_hWnd,requested_ == 1 ? 771 : 772);
+        if (!field) return E_UNEXPECTED;
+        // OleCreatePropertyFrameIndirect calls EditProperty during dialog
+        // setup, which also assigns its initial focus. Queue the documented
+        // dialog focus request so that assignment cannot overwrite it.
+        if (::PostMessageW(m_hWnd,WM_NEXTDLGCTL,reinterpret_cast<WPARAM>(field),TRUE)) return S_OK;
+        const DWORD error = ::GetLastError();
+        return error ? HRESULT_FROM_WIN32(error) : E_FAIL;
+    }
     static void CALLBACK EditTimer(HWND window, UINT, UINT_PTR id, DWORD) {
         ::KillTimer(window, id);
         auto page = reinterpret_cast<PropertyPage*>(::GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -632,6 +663,13 @@ private:
     }
     void EditAndFinish() {
         ATL::CComPtr<IPropertyPage> protect(this);
+        if (state_.selectProperty) {
+            ::SetActiveWindow(::GetAncestor(m_hWnd,GA_ROOT));
+            state_.focusObserved = ::GetDlgCtrlID(::GetFocus());
+            state_.selectedFocus = requested_ != DISPID_UNKNOWN &&
+                ::GetFocus() == ::GetDlgItem(m_hWnd,requested_ == 1 ? 771 : 772);
+            state_.good = state_.selectedFocus && state_.good;
+        }
         LCID locale = 0;
         state_.good = m_pPageSite && m_pPageSite->GetLocaleID(&locale) == S_OK && locale == state_.locale && state_.good;
         state_.good = ::SetDlgItemInt(m_hWnd, 771, 314, FALSE) && state_.good;
@@ -668,6 +706,7 @@ private:
     PropertyState& state_;
     ATL::CComPtr<IOleObject> object_;
     bool posted_ = false;
+    DISPID requested_ = DISPID_UNKNOWN;
 };
 class PageFactory : public IClassFactory {
 public:
@@ -770,6 +809,56 @@ bool propertyFrames() {
             REQUIRE(state.destroyed == 0 && window.DestroyWindow() && state.destroyed == 1);
             window.m_hWnd = nullptr;
         }
+    }
+    // This native entry point selects a property via IPerPropertyBrowsing,
+    // queries the authored page for IPropertyPage2, then calls its override.
+    {
+        PropertyState beforeActivation; beforeActivation.selectProperty = true;
+        auto concrete = new (std::nothrow) PropertyPage(beforeActivation);
+        REQUIRE(concrete);
+        ATL::CComPtr<IPropertyPage2> page; page.Attach(concrete);
+        REQUIRE(page->EditProperty(2) == S_OK && !concrete->m_hWnd &&
+            beforeActivation.selectedProperty == 2 && beforeActivation.selections == 1);
+        REQUIRE(page->EditProperty(-77) == DISP_E_MEMBERNOTFOUND &&
+            beforeActivation.selectedProperty == 2 && beforeActivation.selections == 1);
+        page.Release(); REQUIRE(beforeActivation.destroyed == 1 && beforeActivation.good);
+    }
+    for (DISPID member : {DISPID(1),DISPID(2)}) {
+        properties = PropertyState{}; properties.pageClass = pageClass;
+        properties.reenter = false; properties.useMap = true;
+        properties.selectProperty = true; properties.cancel = member == 2;
+        ControlState state; state.properties = &properties;
+        OwnedWindow<ATL::CAxWindow> window;
+        RECT rect{0,0,100,100}; REQUIRE(window.Create(nullptr,&rect,nullptr,WS_POPUP));
+        state.window = properties.owner = window;
+        ATL::CComPtr<IOleControlSite> site;
+        REQUIRE(window.QueryHost(&site) == S_OK); properties.site = site;
+        auto control = new Control(state);
+        properties.identity = static_cast<IOleObject*>(control);
+        REQUIRE(window.AttachControl(static_cast<IOleObject*>(control)) == S_OK); control->Release();
+        if (properties.cancel) ::EnableWindow(window,FALSE);
+        const BOOL enabled = ::IsWindowEnabled(window);
+        IUnknown* object = properties.identity;
+        OCPFIPARAMS parameters{}; parameters.cbStructSize = sizeof(parameters);
+        parameters.hWndOwner = window; parameters.lpszCaption = L"OpenWTL control";
+        parameters.cObjects = 1; parameters.lplpUnk = &object;
+        parameters.cPages = 1; parameters.lpPages = &pageClass;
+        parameters.lcid = properties.locale; parameters.dispidInitialProperty = member;
+        REQUIRE(::OleCreatePropertyFrameIndirect(&parameters) == S_OK);
+        if (!properties.good || !properties.selectedFocus || properties.selections <= 0 ||
+            properties.selectedProperty != member)
+            std::fprintf(stderr,"PROPERTY_FRAME_SELECTION member=%ld selected=%ld calls=%d focus=%d actual_control=%d good=%d\n",
+                member,properties.selectedProperty,properties.selections,properties.selectedFocus,properties.focusObserved,properties.good);
+        REQUIRE(properties.good && properties.selectedFocus && properties.selections > 0 &&
+            properties.selectedProperty == member);
+        REQUIRE(properties.created > 0 && properties.created == properties.destroyed &&
+            properties.activated == properties.deactivated && properties.bound == properties.unbound &&
+            properties.sites == properties.clearedSites && properties.shown == 1);
+        REQUIRE(properties.cancel ? properties.applied == 0 && properties.value == 9 :
+            properties.applied > 0 && properties.value == 314);
+        REQUIRE(::IsWindowEnabled(window) == enabled);
+        REQUIRE(state.destroyed == 0 && window.DestroyWindow() && state.destroyed == 1);
+        window.m_hWnd = nullptr;
     }
     REQUIRE(module.GetLockCount() == 0);
     return true;

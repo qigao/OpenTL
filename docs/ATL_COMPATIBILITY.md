@@ -1207,7 +1207,9 @@ and normal LoadStringW resource selection; no locale-specific resource policy is
 implemented yet. Empty title ID zero
 returns an independently allocated empty title. The default Apply returns S_OK
 without applying properties; derived pages supply validation/update logic and
-clear dirty only on success. Help and EditProperty default to E_NOTIMPL.
+clear dirty only on success. EditProperty follows ATL's documented E_NOTIMPL
+default; application pages override it to map their own DISPIDs to controls.
+Help is currently E_NOTIMPL here and remains an implementation gap.
 
 Existing native host cases exercise a real resource dialog over repeated
 activation/deactivation, metadata allocation/missing-resource cleanup, aliased
@@ -1249,8 +1251,9 @@ metrics for ordinary DS_SETFONT resources. Mapping uses MulDiv in dialog units,
 and all font/DC selections are released before returning.
 
 The scope is system/current-context DPI, not a future parent's per-monitor DPI.
-DS_FIXEDSYS/shell-font substitution, special point size 0x7fff, non-normal font
-weights and overlong face names return ERROR_NOT_SUPPORTED; explicit pixel size
+Special point size 0x7fff, non-normal font weights, overlong face names and
+nonstandard shell-font face/style combinations return ERROR_NOT_SUPPORTED;
+fixed/shell-font extensions are described below. Explicit pixel size
 remains available. No Windows10-only DPI imports are introduced.
 
 Existing host cases compare standard/no-font, standard/FONT and extended/FONT
@@ -1259,3 +1262,32 @@ so original CLSID child controls are not activated. Cases verify header/font
 truncation, invalid dimensions and unsupported encodings; direct GetPageInfo
 checks assert no page HWND/final callback or inferred-size cache. Native matrix
 qualification of this new inference path is pending.
+
+### Fixed/shell fonts and application property selection (qualification pending)
+
+Dialog-size measurement now distinguishes an unstyled SYSTEM_FONT dialog from
+a DS_FIXEDSYS dialog without DS_SETFONT. The latter is measured using the native
+borrowed SYSTEM_FIXED_FONT; no stock font is deleted. Standard/extended
+DS_SHELLFONT with the documented MS Shell Dlg face uses the existing native font
+mapping path. Other shell-face combinations remain unsupported instead of
+silently choosing a different font. Existing tests mutate the original bounded
+headers and compare all admitted style cases with actual native MapDialogRect,
+including repeated measurements to exercise stock-font/DC ownership.
+
+IPropertyPage2Impl::EditProperty returning E_NOTIMPL is the standard ATL default,
+not an unfinished framework algorithm. Generic code cannot infer a mapping from
+an application's DISPID to its HWND. The native page fixture now supplies a
+business override that stores preactivation requests and focuses one of two edit
+controls when active. The business override posts WM_NEXTDLGCTL instead of
+synchronously sending it during frame initialization, so native initial focus
+assignment does not overwrite the request. Existing lifecycle cases call Windows
+OleCreatePropertyFrameIndirect with two different initial DISPIDs. Windows owns
+IPerPropertyBrowsing mapping, IPropertyPage2 discovery and EditProperty dispatch;
+the case checks the selected field's actual focus and real Apply versus Cancel,
+site/object/window release and owner enabled state. No test mode or budget is added.
+Help invocation, locale-specific resource policy, special message fonts and future
+parent per-monitor DPI behavior remain independent work under #95.
+
+References: [IPropertyPage2Impl default](https://learn.microsoft.com/en-us/cpp/atl/reference/ipropertypage2impl-class),
+[initial property selection](https://learn.microsoft.com/en-us/windows/win32/api/olectl/nf-olectl-olecreatepropertyframeindirect),
+[dialog styles](https://learn.microsoft.com/en-us/windows/win32/dlgbox/dialog-box-styles).

@@ -697,6 +697,27 @@ bool propertyPageMetrics() {
     using ATL::detail::PropertyPageDialogSize;
     using ATL::detail::PropertyPageResourceSize;
     const HINSTANCE instance=ATL::_AtlBaseModule.GetResourceInstance();
+    const auto compareNative=[&](const std::vector<BYTE>& record)->bool {
+        PropertyPageTemplateMetrics metadata;
+        SIZE measured{};
+        CHECK(ReadPropertyPageTemplateMetrics(record.data(),record.size(),metadata)==ERROR_SUCCESS);
+        CHECK(PropertyPageDialogSize(record.data(),record.size(),measured)==S_OK);
+        std::vector<DWORD> header((metadata.headerBytes+3)/4,0);
+        std::memcpy(header.data(),record.data(),metadata.headerBytes);
+        const WORD noControls=0;
+        std::memcpy(reinterpret_cast<BYTE*>(header.data())+(metadata.extended?16:8),&noControls,sizeof(noControls));
+        MetricsDialogWindow native;
+        native.window=::CreateDialogIndirectParamW(instance,reinterpret_cast<const DLGTEMPLATE*>(header.data()),
+            ::GetDesktopWindow(),MetricsDialogProcedure,0);
+        CHECK(native.window);
+        RECT oracle{0,0,metadata.cx,metadata.cy};
+        CHECK(::MapDialogRect(native.window,&oracle));
+        if (measured.cx!=oracle.right || measured.cy!=oracle.bottom)
+            std::fprintf(stderr,"PROPERTY_PAGE_FONT_MISMATCH style=%08lx extended=%d measured=%ld,%ld native=%ld,%ld\n",
+                static_cast<unsigned long>(metadata.style),metadata.extended,measured.cx,measured.cy,oracle.right,oracle.bottom);
+        CHECK(measured.cx==oracle.right && measured.cy==oracle.bottom);
+        return true;
+    };
     SIZE output{123,456};
     CHECK(PropertyPageDialogSize(nullptr,0,output)==HRESULT_FROM_WIN32(ERROR_INVALID_DATA) && !output.cx && !output.cy);
     CHECK(PropertyPageResourceSize(instance,nullptr,output)==E_POINTER && !output.cx && !output.cy);
@@ -753,9 +774,23 @@ bool propertyPageMetrics() {
         }
         {
             auto bad=snapshot;
-            const DWORD unqualifiedStyle=parsed.style|DS_FIXEDSYS;
-            std::memcpy(bad.data()+(parsed.extended?12:0),&unqualifiedStyle,sizeof(unqualifiedStyle));
-            CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
+            const DWORD fixedStyle=parsed.style|DS_FIXEDSYS;
+            std::memcpy(bad.data()+(parsed.extended?12:0),&fixedStyle,sizeof(fixedStyle));
+            CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==S_OK && compareNative(bad));
+            // Restore the caller's DC selections on every repeated stock-font
+            // measurement; a borrowed SYSTEM_FIXED_FONT must not be deleted.
+            for (int repeat=0;repeat<4;++repeat) {
+                SIZE again{};
+                CHECK(PropertyPageDialogSize(bad.data(),bad.size(),again)==S_OK &&
+                    again.cx==output.cx && again.cy==output.cy);
+            }
+            if (parsed.hasFont) {
+                const SIZE_T faceBytes=(std::wcslen(parsed.face)+1)*sizeof(WCHAR);
+                const SIZE_T faceOffset=parsed.headerBytes-faceBytes;
+                const WCHAR notShell=L'X';
+                std::memcpy(bad.data()+faceOffset,&notShell,sizeof(notShell));
+                CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
+            }
         }
         if (parsed.hasFont) {
             const SIZE_T faceBytes=(std::wcslen(parsed.face)+1)*sizeof(WCHAR);
