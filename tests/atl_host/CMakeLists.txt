@@ -6,7 +6,11 @@ if(MINGW)
 endif()
 foreach(mode IN ITEMS events browser lifecycle)
   add_test(NAME openatl.activex_${mode} COMMAND openatl_activex ${mode})
-  set_tests_properties(openatl.activex_${mode} PROPERTIES TIMEOUT 25)
+  # These modes create native top-level OLE/Property Sheet UI on the same
+  # interactive desktop. Keep them mutually exclusive even when a developer
+  # runs CTest in parallel; unrelated native tests may still overlap.
+  set_tests_properties(openatl.activex_${mode} PROPERTIES
+    TIMEOUT 25 RESOURCE_LOCK openatl_activex_native_ui)
 endforeach()
 # The lifecycle case includes native property frames, normal/user-cancel
 # wizards and guarded creation teardown. A local successful run takes ~29s;
@@ -46,5 +50,6 @@ if(CMAKE_HOST_WIN32)
     PROPERTIES OBJECT_DEPENDS "${_commap_generated}/COMMap.tlb;${_commap_generated}/aggreg/Aggreg.tlb;${_safe_generated}/AtlSafeArray.tlb;${PROJECT_BINARY_DIR}/tests/com_server/event-fixture/EventFixture.tlb")
   add_dependencies(openatl_activex openatl_microsoft_commap_midl openatl_com_server_fixture
     openatl_unload_fixture openatl_unload_probe)
-  set_tests_properties(openatl.activex_events PROPERTIES RESOURCE_LOCK openatl_com_server_registration)
+  set_tests_properties(openatl.activex_events PROPERTIES
+    RESOURCE_LOCK "openatl_activex_native_ui;openatl_com_server_registration")
 endif()
