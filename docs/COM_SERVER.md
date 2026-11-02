@@ -421,6 +421,15 @@ missing LIBID/IID failures, and image-TLB mode fail-closed behavior.
 It intentionally creates a true OS Automation type-info object, not a
 fake IDispatch function returning success.
 
+The existing own MIDL event TypeLib also defines a dual `Combine` method with
+one required `LONG` and one typed `defaultvalue(7)` parameter. The core test
+implements that generated vtable through `IDispatchImpl` and asks Windows'
+`ITypeInfo::Invoke` to supply the omitted default. Explicit positional and
+named-optional calls, reverse `DISPPARAMS` ordering, a missing required value
+and the native type-mismatch argument index are checked independently. This
+qualifies typed MIDL defaults; untyped optional VARIANTs and broader LCID
+conversion remain separate work.
+
 **This is partial ATL Automation compatibility.** There is no successful
 registered/installed TypeLib native acceptance yet; the standard holder
 does not cache type-info across apartment/module lifetime boundaries.

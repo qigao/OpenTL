@@ -9,6 +9,19 @@ library OpenATLEventLib
     importlib("stdole2.tlb");
     typedef enum OpenATLEventState { EventIdle = 0, EventReady = 2 } OpenATLEventState;
     typedef LONG OpenATLEventCount;
+    [
+        object,
+        dual,
+        oleautomation,
+        uuid(D7022AF6-51CE-49AF-9872-1140D1824961)
+    ]
+    interface IOpenATLInvokeFixture : IDispatch
+    {
+        [id(301)] HRESULT Combine(
+            [in] LONG requiredValue,
+            [in, defaultvalue(7)] LONG optionalValue,
+            [out, retval] LONG* result);
+    };
     [uuid(D7022AF2-51CE-49AF-9872-1140D1824961)]
     dispinterface _IOpenATLDispatchEvents
     {
