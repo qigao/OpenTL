@@ -1274,8 +1274,10 @@ public:
         nativeAccelKey = message->wParam;
         return PSNRET_MESSAGEHANDLED;
     }
-    int wizardNext = 0;
-    bool vetoWizardNext = false;
+    int wizardNext = 0, cancelQueries = 0, resetCalls = 0;
+    bool vetoWizardNext = false, vetoCancel = false;
+    BOOL OnQueryCancel() { ++cancelQueries; return vetoCancel ? TRUE : FALSE; }
+    void OnReset() { ++resetCalls; }
     int OnWizardNext() { ++wizardNext; return vetoWizardNext ? -1 : 0; }
     bool expectedCreateFailure = false;
     HRESULT createResult = E_UNEXPECTED;
@@ -1617,6 +1619,52 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
             state.destroyed == 1 && module.GetLockCount() == 0);
     return true;
 }
+// Native user Cancel is not equivalent to a COM control forcibly calling
+// DestroyWindow on a sheet that is still being created. Exercise the real
+// PropertySheet PSBTN_CANCEL -> PSN_QUERYCANCEL/PSN_RESET contract separately.
+bool originalWtlWizardUserCancel(ControlState& state, ATL::CAtlModule& module,
+                                 REFCLSID registeredId) {
+    state = ControlState{};
+    state.classId = registeredId;
+    state.discoverWindow = true;
+    state.siteFirst = true;
+    state.streamBytes = 8;
+    OriginalWtlAxPage page;
+    WTL::CPropertySheet wizard(L"Original WTL native Cancel");
+    wizard.SetWizardMode();
+    const HPROPSHEETPAGE handle = page.Create();
+    REQUIRE(handle && wizard.AddPage(handle));
+    const HWND sheet = wizard.Create(nullptr);
+    NativeSheetGuard owner{sheet};
+    REQUIRE(sheet && ::IsWindow(sheet));
+    REQUIRE(::SendMessageW(sheet, PSM_SETCURSEL, 0, 0));
+    REQUIRE(reinterpret_cast<HWND>(
+                ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0)) ==
+                page.m_hWnd && page.initialized == 1 &&
+            page.createCalls == 1 && state.activated == 1 &&
+            state.loaded == 1 && !state.closed);
+    page.vetoCancel = true;
+    ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_CANCEL, 0);
+    REQUIRE(NativeWizardDispatchPending(sheet));
+    REQUIRE(::IsWindow(sheet) && page.m_hWnd &&
+            page.cancelQueries == 1 && page.resetCalls == 0 &&
+            state.activated == 1 && state.closed == 0);
+    page.vetoCancel = false;
+    ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_CANCEL, 0);
+    if (::IsWindow(sheet)) REQUIRE(NativeWizardDispatchPending(sheet));
+    // Modeless PropertySheet need not destroy the top-level window after
+    // native Cancel. Win32's completion signal is that no current page
+    // remains; the application then owns the final DestroyWindow(sheet).
+    const bool cancelled = !::IsWindow(sheet) ||
+        ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0) == 0;
+    REQUIRE(cancelled && page.cancelQueries == 2 && page.resetCalls == 1);
+    if (::IsWindow(sheet)) REQUIRE(::DestroyWindow(sheet));
+    REQUIRE(!::IsWindow(sheet) && !page.m_hWnd &&
+            page.destroyed == 1 && state.activated == 1 &&
+            state.closed == 1 && state.detached == 1 &&
+            state.destroyed == 1 && module.GetLockCount() == 0);
+    return true;
+}
 bool resourceInitialization() {
     ControlState state;
     CLSID classId{};
@@ -1628,6 +1676,7 @@ bool resourceInitialization() {
     REQUIRE(originalWtlAxPage(state, module, classId));
     REQUIRE(originalWtlAxPageFailedInit(state, module, classId));
     REQUIRE(originalWtlAxWizard(state, module, classId));
+    REQUIRE(originalWtlWizardUserCancel(state, module, classId));
     for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619), WORD(620), WORD(621), WORD(622), WORD(631), WORD(632), WORD(633), WORD(648)}) for (int mode = 0; mode < 5; ++mode) {
         state = ControlState{}; state.classId = classId; state.discoverWindow = true;
         state.siteFirst = mode != 1; state.initInterface = mode != 2;
