@@ -313,6 +313,9 @@ struct ControlState {
     bool siteOrder = true, licenseSeen = false;
     bool storageInterface = true, storageReadOnly = true, rejectLicense = false, destroyDuringStorageQuery = false;
     bool discoverWindow = false, destroyDialogDuringInit = false, sendInitDuringLoad = false;
+    bool destroyWizardDuringLoad = false;
+    int wizardCancelRequests = 0;
+    bool wizardCancelSucceeded = false;
     ULONG streamBytes = 4;
     int failInitializationAt = 0;
     HWND window = nullptr;
@@ -575,6 +578,13 @@ private:
         state_.siteOrder = state_.siteOrder && (static_cast<bool>(site_.p) == state_.siteFirst);
         if (state_.destroyDuringInit) ::DestroyWindow(state_.window);
         if (state_.destroyDialogDuringInit) ::DestroyWindow(::GetParent(state_.window));
+        if (state_.destroyWizardDuringLoad) {
+            ++state_.wizardCancelRequests;
+            const HWND sheet = state_.window ?
+                ::GetAncestor(state_.window, GA_ROOT) : nullptr;
+            state_.wizardCancelSucceeded = sheet &&
+                ::DestroyWindow(sheet) != FALSE;
+        }
         if (state_.sendInitDuringLoad) ::SendMessageW(::GetParent(state_.window), WM_INITDIALOG, 0, 0);
         return state_.failInit || !state_.siteOrder || (state_.failInitializationAt &&
             state_.initialized + state_.loaded + state_.storageLoaded == state_.failInitializationAt) ? E_FAIL : S_OK;
@@ -1608,6 +1618,55 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
             state.destroyed == 1 && module.GetLockCount() == 0);
     return true;
 }
+// Native reentrant cancellation: the registered COM control closes the
+// entire real Wizard synchronously *inside* IPersistStreamInit::Load. This
+// exercises original WTL property sheet and page destruction while the
+// unmodified CreateActiveXControls() frame is still executing.
+bool originalWtlWizardCancelDuringLoad(ControlState& state,
+                                       ATL::CAtlModule& module,
+                                       REFCLSID registeredId) {
+    state = ControlState{};
+    state.classId = registeredId;
+    state.siteFirst = true;
+    state.discoverWindow = true;
+    state.streamBytes = 8;
+    state.destroyWizardDuringLoad = true;
+    OriginalWtlAxPage page;
+    page.expectedCreateFailure = true;
+    WTL::CPropertySheet wizard(L"Original WTL load-time cancellation");
+    wizard.SetWizardMode();
+    const HPROPSHEETPAGE handle = page.Create();
+    REQUIRE(handle && wizard.AddPage(handle));
+    const HWND created = wizard.Create(nullptr);
+    const bool returnedLive = created && ::IsWindow(created);
+    // If Windows returned a live sheet after synchronous cancellation,
+    // it must be retired before destroying the C++ page owner.
+    if (returnedLive) ::DestroyWindow(created);
+    const bool valid = state.wizardCancelRequests == 1 &&
+        state.wizardCancelSucceeded && !returnedLive &&
+        page.createCalls == 1 && FAILED(page.createResult) &&
+        page.initialized == 0 && page.destroyed == 1 &&
+        !page.m_hWnd && state.loaded == 1 &&
+        state.activated == 0 && state.closed == 1 &&
+        state.detached == 1 && state.destroyed == 1 &&
+        module.GetLockCount() == 0;
+    if (!valid) {
+        std::fprintf(stderr,
+            "WTL_WIZARD_REENTRANT_CANCEL_FAIL requests=%d cancel_ok=%d"
+            " returned=%p live=%d create_calls=%d create_hr=%08lx"
+            " app_init=%d page_destroyed=%d page_hwnd=%p"
+            " loaded=%d activated=%d closed=%d detached=%d"
+            " control_destroyed=%d module_lock=%ld\\n",
+            state.wizardCancelRequests, state.wizardCancelSucceeded,
+            static_cast<void*>(created), returnedLive, page.createCalls,
+            static_cast<unsigned long>(page.createResult),
+            page.initialized, page.destroyed, static_cast<void*>(page.m_hWnd),
+            state.loaded, state.activated, state.closed, state.detached,
+            state.destroyed, static_cast<long>(module.GetLockCount()));
+    }
+    REQUIRE(valid);
+    return true;
+}
 bool resourceInitialization() {
     ControlState state;
     CLSID classId{};
@@ -1619,6 +1678,7 @@ bool resourceInitialization() {
     REQUIRE(originalWtlAxPage(state, module, classId));
     REQUIRE(originalWtlAxPageFailedInit(state, module, classId));
     REQUIRE(originalWtlAxWizard(state, module, classId));
+    REQUIRE(originalWtlWizardCancelDuringLoad(state, module, classId));
     for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619), WORD(620), WORD(621), WORD(622), WORD(631), WORD(632), WORD(633), WORD(648)}) for (int mode = 0; mode < 5; ++mode) {
         state = ControlState{}; state.classId = classId; state.discoverWindow = true;
         state.siteFirst = mode != 1; state.initInterface = mode != 2;
