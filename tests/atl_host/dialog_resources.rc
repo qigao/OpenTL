@@ -675,3 +675,21 @@ BEGIN
     LTEXT "French split", 782, 0, 45, 80, 12
 END
 LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+
+ 
+// Original WTL ActiveX page: one persisted control plus ordinary list/combo
+// DLGINIT strings. This is a separate resource from the explicit host cases.
+665 DIALOGEX 0, 0, 145, 85
+STYLE WS_POPUP | WS_CAPTION
+BEGIN
+    CONTROL "", 711, "{2D71A87E-15C3-491D-9F8B-8319472CEA04}", WS_CHILD | WS_VISIBLE, 0, 0, 60, 25
+    LISTBOX 715, 0, 28, 60, 42, WS_CHILD | WS_VISIBLE | LBS_HASSTRINGS
+    COMBOBOX 716, 64, 28, 75, 40, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | CBS_HASSTRINGS
+END
+665 240
+BEGIN
+    715, 0x401, 6, 0, 0x6c61, 0x6870, 0x0061
+    716, 0x403, 6, 0, 0x7262, 0x7661, 0x006f
+    711, 0x376, 8, 0, 0x0000, 0x0000, 0x002a, 0x0000
+    0
+END
