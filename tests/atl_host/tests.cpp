@@ -1,5 +1,6 @@
 #include <atlhost.h>
 #include <atlctl.h>
+#include <openatl/property_page_metrics.h>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -600,6 +601,17 @@ bool authoredPropertyPages() {
     CHECK(ATL::CComObject<AuthoredPageSite>::CreateInstance(&frameSite)==S_OK); frameSite->state=&state; frameSite->page=page; frameSite->AddRef();
     ATL::CComPtr<IPropertyPageSite> site; site.Attach(frameSite);
     RECT rect{0,0,180,90}; MSG message{}; PROPPAGEINFO info{},again{};
+    // Default page metadata is derived before activation without executing
+    // the page's dialog procedure or changing its public size override.
+    authored->m_size={}; SIZE inferred{};
+    CHECK(ATL::detail::PropertyPageResourceSize(ATL::_AtlBaseModule.GetResourceInstance(),
+        MAKEINTRESOURCEW(AuthoredPage::IDD),inferred)==S_OK);
+    CHECK(page->GetPageInfo(&info)==S_OK && info.size.cx==inferred.cx && info.size.cy==inferred.cy &&
+        !authored->m_hWnd && state.finalized==0 && !authored->m_size.cx && !authored->m_size.cy);
+    ::CoTaskMemFree(info.pszTitle); info={};
+    authored->m_size={0,90};
+    CHECK(page->GetPageInfo(&info)==E_UNEXPECTED && !info.cb && !info.pszTitle);
+    authored->m_size={180,90};
     CHECK(page->Activate(::GetDesktopWindow(),&rect,FALSE)==E_UNEXPECTED && page->SetPageSite(nullptr)==E_UNEXPECTED);
     CHECK(page->SetPageSite(site)==S_OK && page->SetPageSite(site)==E_UNEXPECTED);
     IUnknown* objects[]={bound.p}; IUnknown* bad[]={nullptr};
@@ -668,6 +680,102 @@ bool authoredPropertyPages() {
     frameSite->drop=page.Detach(); authored->SetDirty(TRUE);
     CHECK(state.destroyed==1 && !frameSite->drop && state.valid);
     frameSite->page=nullptr; bound.Release(); CHECK(objectState.destroyed==1);
+    return true;
+}
+int MetricsDialogCallbacks=0;
+INT_PTR CALLBACK MetricsDialogProcedure(HWND,UINT,WPARAM,LPARAM) {
+    ++MetricsDialogCallbacks;
+    return FALSE;
+}
+struct MetricsDialogWindow {
+    HWND window=nullptr;
+    ~MetricsDialogWindow() { if (::IsWindow(window)) ::DestroyWindow(window); }
+};
+bool propertyPageMetrics() {
+    using ATL::detail::PropertyPageTemplateMetrics;
+    using ATL::detail::ReadPropertyPageTemplateMetrics;
+    using ATL::detail::PropertyPageDialogSize;
+    using ATL::detail::PropertyPageResourceSize;
+    const HINSTANCE instance=ATL::_AtlBaseModule.GetResourceInstance();
+    SIZE output{123,456};
+    CHECK(PropertyPageDialogSize(nullptr,0,output)==HRESULT_FROM_WIN32(ERROR_INVALID_DATA) && !output.cx && !output.cy);
+    CHECK(PropertyPageResourceSize(instance,nullptr,output)==E_POINTER && !output.cx && !output.cy);
+    CHECK(FAILED(PropertyPageResourceSize(instance,MAKEINTRESOURCEW(65534),output)) && !output.cx && !output.cy);
+    for (WORD id : {WORD(602),WORD(607),WORD(606)}) {
+        HRSRC resource=::FindResourceW(instance,MAKEINTRESOURCEW(id),MAKEINTRESOURCEW(5));
+        CHECK(resource);
+        const DWORD size=::SizeofResource(instance,resource);
+        const auto bytes=static_cast<const BYTE*>(::LockResource(::LoadResource(instance,resource)));
+        CHECK(bytes && size);
+        const std::vector<BYTE> snapshot(bytes,bytes+size);
+        PropertyPageTemplateMetrics parsed;
+        CHECK(ReadPropertyPageTemplateMetrics(bytes,size,parsed)==ERROR_SUCCESS);
+        CHECK(parsed.cx==(id==602?80:160) && parsed.cy==(id==602?40:100) &&
+            parsed.extended==(id==606) && parsed.hasFont==(id!=602));
+        const int callbacksBefore=MetricsDialogCallbacks;
+        SIZE measured{},resourceMeasured{};
+        CHECK(PropertyPageDialogSize(bytes,size,measured)==S_OK &&
+            PropertyPageResourceSize(instance,MAKEINTRESOURCEW(id),resourceMeasured)==S_OK &&
+            measured.cx==resourceMeasured.cx && measured.cy==resourceMeasured.cy &&
+            MetricsDialogCallbacks==callbacksBefore && std::memcmp(bytes,snapshot.data(),size)==0);
+        // A native dialog is an independent font-mapping oracle. Only its
+        // original header/font bytes are retained: no CLSID child controls,
+        // application initialization, hosting conversion or COM activation.
+        std::vector<DWORD> header((parsed.headerBytes+3)/4,0);
+        std::memcpy(header.data(),bytes,parsed.headerBytes);
+        const WORD noControls=0;
+        std::memcpy(reinterpret_cast<BYTE*>(header.data())+(parsed.extended?16:8),&noControls,sizeof(noControls));
+        MetricsDialogWindow native;
+        native.window=::CreateDialogIndirectParamW(instance,reinterpret_cast<const DLGTEMPLATE*>(header.data()),
+            ::GetDesktopWindow(),MetricsDialogProcedure,0);
+        CHECK(native.window && MetricsDialogCallbacks>callbacksBefore);
+        RECT oracle{0,0,parsed.cx,parsed.cy};
+        CHECK(::MapDialogRect(native.window,&oracle) && measured.cx==oracle.right && measured.cy==oracle.bottom);
+        // Measuring while a native dialog exists must not dispatch its proc.
+        const int callbacksDuring=MetricsDialogCallbacks;
+        CHECK(PropertyPageDialogSize(bytes,size,output)==S_OK && MetricsDialogCallbacks==callbacksDuring);
+        for (SIZE_T cut=0;cut<parsed.headerBytes;++cut) {
+            output={123,456};
+            CHECK(PropertyPageDialogSize(bytes,cut,output)==HRESULT_FROM_WIN32(ERROR_INVALID_DATA) && !output.cx && !output.cy);
+        }
+        const SIZE_T cxOffset=parsed.extended?22:14,cyOffset=parsed.extended?24:16;
+        for (SHORT invalid : {SHORT(0),SHORT(-1)}) {
+            for (SIZE_T offset : {cxOffset,cyOffset}) {
+                auto bad=snapshot;
+                std::memcpy(bad.data()+offset,&invalid,sizeof(invalid));
+                CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==HRESULT_FROM_WIN32(ERROR_INVALID_DATA) && !output.cx && !output.cy);
+            }
+        }
+        if (parsed.extended) {
+            auto bad=snapshot; const WORD invalidVersion=2;
+            std::memcpy(bad.data(),&invalidVersion,sizeof(invalidVersion));
+            CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+        }
+        {
+            auto bad=snapshot;
+            const DWORD unqualifiedStyle=parsed.style|DS_FIXEDSYS;
+            std::memcpy(bad.data()+(parsed.extended?12:0),&unqualifiedStyle,sizeof(unqualifiedStyle));
+            CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
+        }
+        if (parsed.hasFont) {
+            const SIZE_T faceBytes=(std::wcslen(parsed.face)+1)*sizeof(WCHAR);
+            const SIZE_T faceOffset=parsed.headerBytes-faceBytes;
+            const SIZE_T pointOffset=faceOffset-(parsed.extended?6:2);
+            auto bad=snapshot; const WORD specialSize=0x7fff;
+            std::memcpy(bad.data()+pointOffset,&specialSize,sizeof(specialSize));
+            CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
+            bad=snapshot; const WORD zero=0;
+            std::memcpy(bad.data()+pointOffset,&zero,sizeof(zero));
+            CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+            bad=snapshot; std::memcpy(bad.data()+faceOffset,&zero,sizeof(zero));
+            CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+            if (parsed.extended) {
+                bad=snapshot; const WORD unqualifiedWeight=FW_BOLD;
+                std::memcpy(bad.data()+pointOffset+sizeof(WORD),&unqualifiedWeight,sizeof(unqualifiedWeight));
+                CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
+            }
+        }
+    }
     return true;
 }
 size_t DialogBytesFind(const std::vector<BYTE>& bytes, const void* value, size_t size) {
@@ -1506,7 +1614,7 @@ int main(int argc, char** argv) {
     ULONG_PTR token = 0;
     if (::CoGetContextToken(&token) != CO_E_NOTINITIALIZED || !ATL::AtlAxWinInit() ||
         ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
-    if (!propertyMaps() || !propertyBrowsing() || !persistentProperties() || !authoredPropertyPages() || !dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
+    if (!propertyMaps() || !propertyBrowsing() || !persistentProperties() || !authoredPropertyPages() || !propertyPageMetrics() || !dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
     HRESULT hr = ::OleInitialize(nullptr); if (FAILED(hr)) return 1;
     bool ok = true;
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)

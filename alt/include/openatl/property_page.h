@@ -5,6 +5,7 @@
 #include "../atlbase.h"
 #include "../atlcomcli.h"
 #include "../atlwin.h"
+#include "property_page_metrics.h"
 #include <ocidl.h>
 #include <new>
 #include <limits>
@@ -22,8 +23,9 @@ inline HRESULT PropertyPageException() noexcept {
 }
 
 // T supplies its normal native dialog Create/DestroyWindow/m_hWnd operations.
-// Before activation, set m_size explicitly in pixels. This initial subset does
-// not infer font metrics from dialog-template bytes. Containers must Deactivate
+// Positive m_size supplies an explicit pixel override. Otherwise GetPageInfo
+// measures the IDD header/font in the current system DPI context without
+// creating a window or invoking application callbacks. Containers must Deactivate
 // before releasing their final page reference, as required by the page protocol.
 // IPropertyPage2 is the single interface lineage; applications choose the COM
 // map entries they expose. EditProperty defaults to E_NOTIMPL.
@@ -126,8 +128,6 @@ public:
                 window_=nullptr;
                 return E_UNEXPECTED;
             }
-            RECT client{};
-            if (::GetClientRect(window,&client)) m_size={client.right,client.bottom};
             return S_OK;
         } catch (...) { return detail::PropertyPageException(); }
     }
@@ -145,8 +145,12 @@ public:
     HRESULT STDMETHODCALLTYPE GetPageInfo(PROPPAGEINFO* output) override {
         if (!output) return E_POINTER;
         *output={};
-        if (m_size.cx <= 0 || m_size.cy <= 0) return E_UNEXPECTED;
-        PROPPAGEINFO staged{}; staged.cb=sizeof(staged); staged.size=m_size;
+        SIZE desired=m_size;
+        if (!desired.cx && !desired.cy) {
+            const HRESULT sizeResult=ResourceSize<T>(desired,0);
+            if (FAILED(sizeResult)) return sizeResult;
+        } else if (desired.cx <= 0 || desired.cy <= 0) return E_UNEXPECTED;
+        PROPPAGEINFO staged{}; staged.cb=sizeof(staged); staged.size=desired;
         staged.dwHelpContext=m_dwHelpContext;
         HRESULT hr=LoadText(m_dwTitle,&staged.pszTitle,true);
         if (SUCCEEDED(hr)) hr=LoadText(m_dwDocString,&staged.pszDocString,false);
@@ -198,6 +202,14 @@ private:
     };
     bool changing_=false;
     HWND window_=nullptr;
+    template<class U, unsigned long long Id=static_cast<unsigned long long>(U::IDD)>
+    static HRESULT ResourceSize(SIZE& size,int) noexcept {
+        if constexpr (!Id || Id > 0xffff) return E_INVALIDARG;
+        else return detail::PropertyPageResourceSize(_AtlBaseModule.GetResourceInstance(),
+            MAKEINTRESOURCEW(static_cast<WORD>(Id)),size);
+    }
+    template<class U>
+    static HRESULT ResourceSize(SIZE&,...) noexcept { return E_NOTIMPL; }
     bool OwnsWindow() const noexcept {
         return window_ && ::IsWindow(window_) && static_cast<const T*>(this)->m_hWnd == window_;
     }

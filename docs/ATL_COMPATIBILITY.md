@@ -602,7 +602,7 @@ whole-application admission are unchanged.
 
 This implements declarations and page discovery; per-property browsing and
 property-bag persistence are described below. IPersistStreamInitImpl, interface-serialization callback
-entries, IPropertyPageImpl, CAxPropertyPageImpl, control splitting and composite
+entries, complete IPropertyPageImpl behavior, CAxPropertyPageImpl, control splitting and composite
 controls remain unfinished. A property-map declaration alone does not implement
 storage, loading or saving. The persistence mixin must also be exposed to a caller
 supplying IPropertyBag. Display-string browsing does not access direct-data members.
@@ -823,7 +823,8 @@ and whole-application admission remain unchanged.
 
 Source property-map declarations and page discovery are supported as described
 above, together with per-property browsing and property-bag persistence.
-IPropertyPageImpl, CAxPropertyPageImpl, stream persistence,
+The property-page authoring foundation is described below. Full IPropertyPageImpl
+behavior, CAxPropertyPageImpl, property-map stream persistence,
 control splitting and full composite-control behavior remain unfinished.
 
 References: [IOleControlSite::ShowPropertyFrame](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-iolecontrolsite-showpropertyframe),
@@ -1199,10 +1200,11 @@ site/object replacement and activation/deactivation transitions are rejected.
 Rectangles are checked in wide arithmetic before conversion to native sizes.
 The container must Deactivate before releasing its final page reference.
 
-Before GetPageInfo/activation, set m_size explicitly in pixels. Resource IDs
-m_dwTitle/m_dwDocString/m_dwHelpFile use the current resource instance and
-normal LoadStringW resource selection; no locale-specific resource policy or
-dialog-font/template size inference is implemented yet. Empty title ID zero
+A positive m_size explicitly overrides the page size in pixels. With both fields
+zero, GetPageInfo uses the bounded current-context resource measurement below.
+Resource IDs m_dwTitle/m_dwDocString/m_dwHelpFile use the current resource instance
+and normal LoadStringW resource selection; no locale-specific resource policy is
+implemented yet. Empty title ID zero
 returns an independently allocated empty title. The default Apply returns S_OK
 without applying properties; derived pages supply validation/update logic and
 clear dirty only on success. Help and EditProperty default to E_NOTIMPL.
@@ -1227,4 +1229,33 @@ Direct page-info cases load nonzero title/doc/help resource IDs, verify copied
 strings are independent, and verify cleanup when a later resource field fails.
 The native frame uses the same repository-owned metadata resources. These are
 pending native execution; successful site-LCID propagation does not establish
-locale-specific resource selection, font/template size inference or help UI.
+locale-specific resource selection or help UI. Font/template size inference
+is a separate candidate described below.
+
+### Preactivation page-size inference (qualification pending)
+
+When m_size is entirely zero, GetPageInfo reads T::IDD from the current resource
+instance and derives pixel size without creating a dialog, initializing COM or
+running application callbacks. A positive explicit m_size wins; invalid partial
+sizes are rejected. Custom Create classes without a constant numeric IDD may
+continue to supply an explicit size; automatic lookup returns E_NOTIMPL for them.
+Inferred size is not written into m_size or cached across DPI contexts.
+
+The helper reuses the bounded DialogTemplateReader for standard and extended
+headers, positive signed dimensions and terminated font names. No child-control
+creation data is interpreted. Native GetDialogBaseUnits handles unstyled fonts;
+CreateFontIndirectW, GetTextMetricsW and GetTextExtentPoint32W supply the font
+metrics for ordinary DS_SETFONT resources. Mapping uses MulDiv in dialog units,
+and all font/DC selections are released before returning.
+
+The scope is system/current-context DPI, not a future parent's per-monitor DPI.
+DS_FIXEDSYS/shell-font substitution, special point size 0x7fff, non-normal font
+weights and overlong face names return ERROR_NOT_SUPPORTED; explicit pixel size
+remains available. No Windows10-only DPI imports are introduced.
+
+Existing host cases compare standard/no-font, standard/FONT and extended/FONT
+headers to real native MapDialogRect results. Oracle dialogs have zero controls,
+so original CLSID child controls are not activated. Cases verify header/font
+truncation, invalid dimensions and unsupported encodings; direct GetPageInfo
+checks assert no page HWND/final callback or inferred-size cache. Native matrix
+qualification of this new inference path is pending.
