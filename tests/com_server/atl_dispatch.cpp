@@ -87,6 +87,16 @@ public:
         *result = *value * 2;
         return S_OK;
     }
+    HRESULT STDMETHODCALLTYPE InspectOptional(VARIANT value, LONG* result) override {
+        if (!result) return E_POINTER;
+        if (value.vt == VT_ERROR && value.scode == DISP_E_PARAMNOTFOUND) {
+            *result = -1;
+            return S_OK;
+        }
+        if (value.vt != VT_I4) return DISP_E_TYPEMISMATCH;
+        *result = value.lVal;
+        return S_OK;
+    }
 };
 struct Apartment {
     HRESULT status = ::CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
@@ -312,6 +322,53 @@ bool TestByReferenceArguments() {
     DISPATCH_CHECK(raw->Release() == 0);
     return true;
 }
+bool TestUntypedOptionalArgument() {
+    ATL::CComObject<OptionalDual>* raw = nullptr;
+    DISPATCH_CHECK(ATL::CComObject<OptionalDual>::CreateInstance(&raw) == S_OK && raw);
+    DISPATCH_CHECK(raw->AddRef() == 1);
+    ATL::CComPtr<IOpenATLInvokeFixture> typed;
+    ATL::CComPtr<IDispatch> dispatch;
+    DISPATCH_CHECK(raw->QueryInterface(IID_IOpenATLInvokeFixture,
+        reinterpret_cast<void**>(&typed.p)) == S_OK && typed.p);
+    DISPATCH_CHECK(raw->QueryInterface(IID_IDispatch,
+        reinterpret_cast<void**>(&dispatch.p)) == S_OK && dispatch.p);
+
+    ATL::CComVariant directValue(static_cast<LONG>(17));
+    LONG directResult = 0;
+    DISPATCH_CHECK(typed->InspectOptional(directValue, &directResult) == S_OK &&
+        directResult == 17);
+
+    LPOLESTR names[] = {const_cast<LPOLESTR>(L"InspectOptional"),
+        const_cast<LPOLESTR>(L"value")};
+    DISPID ids[] = {DISPID_UNKNOWN, DISPID_UNKNOWN};
+    DISPATCH_CHECK(dispatch->GetIDsOfNames(IID_NULL, names, 2,
+        LOCALE_SYSTEM_DEFAULT, ids) == S_OK && ids[0] == 303 &&
+        ids[1] != DISPID_UNKNOWN);
+
+    DISPPARAMS omitted{};
+    ATL::CComVariant omittedResult;
+    DISPATCH_CHECK(dispatch->Invoke(ids[0], IID_NULL, LOCALE_SYSTEM_DEFAULT,
+        DISPATCH_METHOD, &omitted, &omittedResult, nullptr, nullptr) == S_OK &&
+        omittedResult.vt == VT_I4 && omittedResult.lVal == -1);
+
+    ATL::CComVariant explicitValue(static_cast<LONG>(23));
+    DISPPARAMS explicitValues{&explicitValue, nullptr, 1, 0};
+    ATL::CComVariant explicitResult;
+    DISPATCH_CHECK(dispatch->Invoke(ids[0], IID_NULL, LOCALE_SYSTEM_DEFAULT,
+        DISPATCH_METHOD, &explicitValues, &explicitResult, nullptr, nullptr) == S_OK &&
+        explicitResult.vt == VT_I4 && explicitResult.lVal == 23);
+
+    ATL::CComVariant namedValue(static_cast<LONG>(29));
+    DISPPARAMS namedValues{&namedValue, &ids[1], 1, 1};
+    ATL::CComVariant namedResult;
+    DISPATCH_CHECK(dispatch->Invoke(ids[0], IID_NULL, LOCALE_SYSTEM_DEFAULT,
+        DISPATCH_METHOD, &namedValues, &namedResult, nullptr, nullptr) == S_OK &&
+        namedResult.vt == VT_I4 && namedResult.lVal == 29);
+
+    dispatch.Release(); typed.Release();
+    DISPATCH_CHECK(raw->Release() == 0);
+    return true;
+}
 } // namespace
 
 bool RunAtlDispatchTests() {
@@ -323,6 +380,7 @@ bool RunAtlDispatchTests() {
         DISPATCH_CHECK(TestRealOleTypeInfo());
         DISPATCH_CHECK(TestOptionalDefaultArguments());
         DISPATCH_CHECK(TestByReferenceArguments());
+        DISPATCH_CHECK(TestUntypedOptionalArgument());
         DISPATCH_CHECK(TestMissingTypeLibrary());
         DISPATCH_CHECK(RunAtlFileTypeLibTests());
     }

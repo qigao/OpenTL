@@ -437,6 +437,12 @@ type-mismatch indexing for an incompatible BYREF value. This qualifies typed
 scalar BYREF dispatch; nested VARIANT, array, record and interface-reference
 forms remain separate compatibility boundaries.
 
+An additional `[optional] VARIANT` method verifies the untyped omission rule:
+Windows fills a missing trailing argument with `VT_ERROR` and
+`DISP_E_PARAMNOTFOUND` before calling the generated vtable. Explicit positional
+and named values remain ordinary VARIANTs. This does not qualify varargs or
+locale-sensitive conversion.
+
 **This is partial ATL Automation compatibility.** There is no successful
 registered/installed TypeLib native acceptance yet; the standard holder
 does not cache type-info across apartment/module lifetime boundaries.
