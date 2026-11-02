@@ -1354,10 +1354,10 @@ metrics for ordinary DS_SETFONT resources. Mapping uses MulDiv in dialog units,
 and all font/DC selections are released before returning.
 
 The scope is system/current-context DPI, not a future parent's per-monitor DPI.
-Special point size 0x7fff, non-normal font weights, overlong face names and
-nonstandard shell-font face/style combinations return ERROR_NOT_SUPPORTED;
-fixed/shell-font extensions are described below. Explicit pixel size
-remains available. No Windows10-only DPI imports are introduced.
+Special point size 0x7fff and overlong face names return ERROR_NOT_SUPPORTED;
+fixed/shell-font extensions and DIALOGEX weight normalization are described
+below. Explicit pixel size remains available. No Windows10-only DPI imports are
+introduced.
 
 Existing host cases compare standard/no-font, standard/FONT and extended/FONT
 headers to real native MapDialogRect results. Oracle dialogs have zero controls,
@@ -1371,11 +1371,13 @@ qualification of this new inference path is pending.
 Dialog-size measurement now distinguishes an unstyled SYSTEM_FONT dialog from
 a DS_FIXEDSYS dialog without DS_SETFONT. The latter is measured using the native
 borrowed SYSTEM_FIXED_FONT; no stock font is deleted. Standard/extended
-DS_SHELLFONT with the documented MS Shell Dlg face uses the existing native font
-mapping path. Other shell-face combinations remain unsupported instead of
-silently choosing a different font. Existing tests mutate the original bounded
-headers and compare all admitted style cases with actual native MapDialogRect,
-including repeated measurements to exercise stock-font/DC ownership.
+DS_SHELLFONT faces use the existing native GDI font-mapping path, including the
+documented MS Shell Dlg and MS Shell Dlg 2 logical aliases. As documented for
+DLGTEMPLATEEX, declared LOGFONT weights from 0 through 1000 are normalized to
+FW_NORMAL; larger encodings remain unsupported. Existing tests mutate the
+original bounded headers and compare these cases with an actual zero-control
+CreateDialogIndirect/MapDialogRect oracle, including repeated measurements to
+exercise stock-font/DC ownership.
 
 IPropertyPage2Impl::EditProperty returning E_NOTIMPL is the standard ATL default,
 not an unfinished framework algorithm. Generic code cannot infer a mapping from
@@ -1394,5 +1396,7 @@ remain independent work under #95.
 References: [IPropertyPage2Impl default](https://learn.microsoft.com/en-us/cpp/atl/reference/ipropertypage2impl-class),
 [initial property selection](https://learn.microsoft.com/en-us/windows/win32/api/olectl/nf-olectl-olecreatepropertyframeindirect),
 [dialog styles](https://learn.microsoft.com/en-us/windows/win32/dlgbox/dialog-box-styles),
+[extended dialog templates](https://learn.microsoft.com/en-us/windows/win32/dlgbox/dlgtemplateex),
+[shell font aliases](https://learn.microsoft.com/en-us/windows/win32/intl/using-ms-shell-dlg-and-ms-shell-dlg-2),
 [localized page metadata](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/ns-ocidl-proppageinfo),
 [language-specific resources](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-findresourceexw).
