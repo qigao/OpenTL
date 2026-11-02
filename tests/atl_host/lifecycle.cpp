@@ -1172,7 +1172,9 @@ public:
     END_MSG_MAP()
 };
 bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module) {
+    const CLSID registeredId = state.classId;
     state = ControlState{};
+    state.classId = registeredId;
     state.discoverWindow = true;
     state.siteFirst = true;
     OriginalWtlAxPage page;
