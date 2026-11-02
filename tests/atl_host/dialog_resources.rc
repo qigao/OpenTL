@@ -677,8 +677,8 @@ END
 LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
 
  
-// Original WTL ActiveX page: one persisted control plus ordinary list/combo
-// DLGINIT strings. This is a separate resource from the explicit host cases.
+// Original WTL ActiveX page: one licensed persisted control plus ordinary
+// list/combo DLGINIT strings. This is separate from the explicit host cases.
 665 DIALOGEX 0, 0, 145, 85
 STYLE WS_POPUP | WS_CAPTION
 BEGIN
@@ -690,6 +690,7 @@ END
 BEGIN
     715, 0x401, 6, 0, 0x6c61, 0x6870, 0x0061
     716, 0x403, 6, 0, 0x7262, 0x7661, 0x006f
-    711, 0x376, 8, 0, 0x0000, 0x0000, 0x002a, 0x0000
+    711, 0x376, 48, 0
+    0x0014, 0x0000, 0x004f, 0x0070, 0x0065, 0x006e, 0x0041, 0x0054, 0x004c, 0x002d, 0x0074, 0x0065, 0x0073, 0x0074, 0x002d, 0x006c, 0x0069, 0x0063, 0x0065, 0x006e, 0x0073, 0x0065, 0x002a, 0x0000
     0
 END

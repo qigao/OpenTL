@@ -137,6 +137,27 @@ See [native property frames](ATL_COMPATIBILITY.md#native-property-frames).
 Simple sink handlers currently return void or HRESULT; the complete Automation
 return-value surface is not yet implemented.
 
+## Original WTL licensed persisted controls
+
+The original-WTL property-page lifecycle fixture uses a counted runtime license
+and persisted stream in the same DLGINIT record. WTL's unmodified
+`CAxPropertyPageImpl` parses the key, advances the native HGLOBAL stream to the
+persisted marker, and reaches the registered `IClassFactory2::CreateInstanceLic`
+path. The factory verifies the exact 20-character key before control creation;
+the control verifies both the marker at the advanced cursor and the complete
+48-byte stream envelope reported by `IStream::Stat`.
+
+A separate native rejection case makes the same factory return
+`CLASS_E_NOTLICENSED`. Original WTL propagates that exact result without
+constructing, loading or activating the control, and the failed host child and
+property sheet still retire with no module lock.
+
+The licensed resource is shared by the existing modeless property-page and
+wizard lifecycle cases, so navigation, event binding, keyboard forwarding,
+load-time cancellation and final COM retirement continue to use the licensed
+control. This remains test-local qualification and does not enable global
+implicit hosting.
+
 ## Original WTL active-control keyboard forwarding
 
 The existing lifecycle fixture also exercises original WTL's control keyboard
