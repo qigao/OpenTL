@@ -21,7 +21,16 @@ template<class T> class OwnedWindow : public T {
 public:
     ~OwnedWindow() { if (::IsWindow(this->m_hWnd)) ::DestroyWindow(this->m_hWnd); }
 };
-struct UIObjectState { ULONG refs = 1; int destroyed = 0; };
+struct UIObjectState {
+    ULONG refs = 1;
+    int destroyed = 0, acceleratorCalls = 0;
+    HWND acceleratorWindow = nullptr;
+    HWND activeWindow = nullptr;
+    WPARAM acceleratorKey = 0;
+    HRESULT acceleratorResult = S_FALSE, clearResult = E_UNEXPECTED;
+    IOleInPlaceFrame* clearActiveFrom = nullptr; // borrowed through the callback
+    bool insideAccelerator = false, destroyedInsideAccelerator = false;
+};
 class UIObject : public IDispatch, public IDropTarget, public IDataObject,
                  public IOleCommandTarget, public IOleInPlaceActiveObject {
 public:
@@ -33,6 +42,7 @@ public:
         else if (iid == IID_IDataObject) *value = static_cast<IDataObject*>(this);
         else if (iid == IID_IOleCommandTarget) *value = static_cast<IOleCommandTarget*>(this);
         else if (iid == IID_IOleInPlaceActiveObject) *value = static_cast<IOleInPlaceActiveObject*>(this);
+        else if (iid == IID_IOleWindow) *value = static_cast<IOleWindow*>(static_cast<IOleInPlaceActiveObject*>(this));
         else return E_NOINTERFACE;
         AddRef(); return S_OK;
     }
@@ -68,15 +78,38 @@ public:
     HRESULT STDMETHODCALLTYPE EnumDAdvise(IEnumSTATDATA**) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE QueryStatus(const GUID*, ULONG, OLECMD[], OLECMDTEXT*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE Exec(const GUID*, DWORD, DWORD, VARIANT*, VARIANT*) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE GetWindow(HWND* value) override { if (!value) return E_POINTER; *value = nullptr; return E_FAIL; }
+    HRESULT STDMETHODCALLTYPE GetWindow(HWND* value) override {
+        if (!value) return E_POINTER;
+        *value = state_ ? state_->activeWindow : nullptr;
+        return *value ? S_OK : E_FAIL;
+    }
     HRESULT STDMETHODCALLTYPE ContextSensitiveHelp(BOOL) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE TranslateAccelerator(LPMSG) override { return S_FALSE; }
+    HRESULT STDMETHODCALLTYPE TranslateAccelerator(LPMSG message) override {
+        if (!message) return E_POINTER;
+        UIObjectState* const state = state_;
+        if (!state || message->message != WM_KEYDOWN) return S_FALSE;
+        ++state->acceleratorCalls;
+        state->acceleratorWindow = message->hwnd;
+        state->acceleratorKey = message->wParam;
+        state->insideAccelerator = true;
+        const HRESULT result = state->acceleratorResult;
+        if (state->clearActiveFrom)
+            state->clearResult = state->clearActiveFrom->SetActiveObject(nullptr, nullptr);
+        // Only the borrowed fixture state is touched after reentrant removal.
+        state->insideAccelerator = false;
+        return result;
+    }
     HRESULT STDMETHODCALLTYPE OnFrameWindowActivate(BOOL) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE OnDocWindowActivate(BOOL) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE ResizeBorder(LPCRECT, IOleInPlaceUIWindow*, BOOL) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE EnableModeless(BOOL) override { return S_OK; }
 private:
-    ~UIObject() { if (state_) ++state_->destroyed; }
+    ~UIObject() {
+        if (state_) {
+            state_->destroyedInsideAccelerator = state_->insideAccelerator;
+            ++state_->destroyed;
+        }
+    }
     ULONG refs_ = 1;
     UIObjectState* state_;
 };
@@ -1385,8 +1418,9 @@ public:
         return nativeFocusTarget;
     }
     int OnTranslateAccelerator(LPMSG message) {
-        if (!message || message->message != WM_KEYDOWN ||
-            message->wParam != VK_F6) return PSNRET_NOERROR;
+        if (!message) return PSNRET_NOERROR;
+        if (message->message != WM_KEYDOWN || message->wParam != VK_F6)
+            return WTL::CAxPropertyPageImpl<OriginalWtlAxPage>::OnTranslateAccelerator(message);
         ++nativeAccelCalls;
         nativeAccelSource = message->hwnd;
         nativeAccelKey = message->wParam;
@@ -1812,6 +1846,139 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
             state.destroyed == 1 && module.GetLockCount() == 0);
     return true;
 }
+// Exercise original WTL's PreTranslateMessage -> WM_FORWARDMSG path using a
+// genuine posted key and native PropSheet_IsDialogMessage. The active object
+// can remove itself while translating without being freed inside its callback.
+bool originalWtlWizardControlKeyboard(ControlState& state, ATL::CAtlModule& module,
+                                      REFCLSID registeredId) {
+    state = ControlState{};
+    state.classId = registeredId;
+    state.discoverWindow = true;
+    state.siteFirst = true;
+    state.streamBytes = 8;
+    state.wizardEvents = true;
+    UIObjectState keyboard;
+    struct ForwardProbe {
+        HWND window = nullptr;
+        int calls = 0;
+        LRESULT result = -1;
+        UINT_PTR Key() const { return reinterpret_cast<UINT_PTR>(this); }
+        static LRESULT CALLBACK Subclass(HWND window, UINT message, WPARAM w, LPARAM l,
+                                         UINT_PTR key, DWORD_PTR data) {
+            auto self = reinterpret_cast<ForwardProbe*>(data);
+            if (message == WM_FORWARDMSG && l && reinterpret_cast<MSG*>(l)->message == WM_KEYDOWN) {
+                ++self->calls;
+                const LRESULT result = ::DefSubclassProc(window, message, w, l);
+                self->result = result;
+                return result;
+            }
+            if (message == WM_NCDESTROY) {
+                ::RemoveWindowSubclass(window, Subclass, key);
+                self->window = nullptr;
+            }
+            return ::DefSubclassProc(window, message, w, l);
+        }
+        bool Attach(HWND target) {
+            if (!::SetWindowSubclass(target, Subclass, Key(), reinterpret_cast<DWORD_PTR>(this))) return false;
+            window = target;
+            return true;
+        }
+        ~ForwardProbe() {
+            if (window && !::RemoveWindowSubclass(window, Subclass, Key())) std::terminate();
+        }
+    } forward;
+    OriginalWtlAxPage page;
+    OriginalWtlWizardSecondPage ordinary;
+    WTL::CPropertySheet wizard(L"Original WTL active-control keyboard");
+    wizard.SetWizardMode();
+    const HPROPSHEETPAGE first = page.Create(), second = ordinary.Create();
+    REQUIRE(first && wizard.AddPage(first) && second && wizard.AddPage(second));
+    const HWND sheet = wizard.Create(nullptr);
+    NativeSheetGuard owner{sheet};
+    REQUIRE(sheet && ::IsWindow(sheet));
+    REQUIRE(::SendMessageW(sheet, PSM_SETCURSEL, 0, 0));
+    REQUIRE(NativeWizardSelected(sheet, page.m_hWnd));
+    const HWND control = ::GetDlgItem(page.m_hWnd, 711);
+    REQUIRE(control && ::IsWindow(control));
+    REQUIRE(forward.Attach(control));
+    ATL::CAxWindow hosted(control);
+    ATL::CComPtr<IOleInPlaceFrame> frame;
+    REQUIRE(hosted.QueryHost(&frame) == S_OK);
+    ATL::CComPtr<UIObject> active;
+    keyboard.activeWindow = control;
+    active.Attach(new UIObject(&keyboard));
+    ATL::CComPtr<IOleWindow> activeWindow;
+    HWND reportedWindow = nullptr;
+    REQUIRE(active->QueryInterface(IID_IOleWindow, reinterpret_cast<void**>(&activeWindow.p)) == S_OK &&
+            activeWindow->GetWindow(&reportedWindow) == S_OK && reportedWindow == control);
+    activeWindow.Release();
+    REQUIRE(frame->SetActiveObject(active, nullptr) == S_OK);
+    active.Release(); // The native host now owns the active object's reference.
+    REQUIRE(keyboard.refs == 1 && !keyboard.destroyed);
+
+    auto postKey = [&](HWND source, WPARAM key) {
+        ::SetFocus(source);
+        if (::GetFocus() != source || !::PostMessageW(source, WM_KEYDOWN, key, 1)) return false;
+        bool observed = false;
+        for (int i = 0; i != 128; ++i) {
+            MSG message{};
+            if (!::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) return observed;
+            if (message.message == WM_QUIT) {
+                ::PostQuitMessage(static_cast<int>(message.wParam));
+                return false;
+            }
+            const bool requested = message.hwnd == source && message.message == WM_KEYDOWN && message.wParam == key;
+            const bool handled = PropSheet_IsDialogMessage(sheet, &message) != FALSE;
+            if (requested) {
+                if (observed) return false;
+                observed = true;
+            }
+            if (!handled) { ::TranslateMessage(&message); ::DispatchMessageW(&message); }
+        }
+        return false;
+    };
+    keyboard.acceleratorResult = S_OK;
+    REQUIRE(postKey(control, VK_F7));
+    REQUIRE(keyboard.acceleratorCalls == 1 && keyboard.acceleratorWindow == control &&
+            keyboard.acceleratorKey == VK_F7 && !keyboard.destroyed &&
+            forward.calls == 1 && forward.result == TRUE);
+    keyboard.acceleratorResult = S_FALSE;
+    REQUIRE(postKey(control, VK_F8));
+    REQUIRE(keyboard.acceleratorCalls == 2 && keyboard.acceleratorKey == VK_F8 &&
+            !page.nativeAccelCalls && state.activated == 1 && !state.closed &&
+            forward.calls == 2 && forward.result == FALSE);
+
+    ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_NEXT, 0);
+    REQUIRE(NativeWizardSelected(sheet, ordinary.m_hWnd));
+    REQUIRE(postKey(::GetDlgItem(ordinary.m_hWnd, 702), VK_F7));
+    REQUIRE(keyboard.acceleratorCalls == 2 && forward.calls == 2); // Hidden Ax page cannot steal keys.
+    ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_BACK, 0);
+    REQUIRE(NativeWizardSelected(sheet, page.m_hWnd));
+    keyboard.acceleratorResult = S_OK;
+    REQUIRE(postKey(control, VK_F7));
+    REQUIRE(keyboard.acceleratorCalls == 3 && page.createCalls == 1 &&
+            page.initialized == 1 && state.loaded == 1 && state.activated == 1 &&
+            forward.calls == 3 && forward.result == TRUE);
+
+    keyboard.clearActiveFrom = frame;
+    REQUIRE(postKey(control, VK_F9));
+    REQUIRE(keyboard.acceleratorCalls == 4 && keyboard.clearResult == S_OK &&
+            keyboard.destroyed == 1 && keyboard.refs == 0 &&
+            !keyboard.destroyedInsideAccelerator && forward.calls == 4 && forward.result == TRUE);
+    REQUIRE(postKey(control, VK_F7));
+    REQUIRE(keyboard.acceleratorCalls == 4 && forward.calls == 5 && forward.result == FALSE &&
+            state.eventAdvises == 1 &&
+            !state.eventUnadvises && state.activeEventControl &&
+            state.activeEventControl->FireWizardEvent(47) == S_OK &&
+            page.eventsReceived == 1 && page.lastEventValue == 47 && !state.closed);
+    REQUIRE(::DestroyWindow(sheet));
+    frame.Release();
+    REQUIRE(!page.m_hWnd && !ordinary.m_hWnd && page.destroyed == 1 &&
+            state.closed == 1 && state.detached == 1 && state.destroyed == 1 &&
+            state.eventAdvises == 1 && state.eventUnadvises == 1 &&
+            keyboard.destroyed == 1 && module.GetLockCount() == 0);
+    return true;
+}
 // The COM control still calls native DestroyWindow synchronously inside Load.
 // The explicit owner guard rejects that in-flight destruction, aborts hosting,
 // and retires the native sheet only after PropertySheet returns. Allowing the
@@ -1944,6 +2111,7 @@ bool resourceInitialization() {
     REQUIRE(originalWtlAxPage(state, module, classId));
     REQUIRE(originalWtlAxPageFailedInit(state, module, classId));
     REQUIRE(originalWtlAxWizard(state, module, classId));
+    REQUIRE(originalWtlWizardControlKeyboard(state, module, classId));
     REQUIRE(originalWtlWizardCancelDuringLoad(state, module, classId));
     REQUIRE(originalWtlWizardUserCancel(state, module, classId));
     for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619), WORD(620), WORD(621), WORD(622), WORD(631), WORD(632), WORD(633), WORD(648)}) for (int mode = 0; mode < 5; ++mode) {
