@@ -323,7 +323,7 @@ struct ControlState {
 class Control : public IOleObject, public IPersistStreamInit, public IPersistStream, public IPersistStorage,
                 public IRunnableObject, public ATL::ISpecifyPropertyPagesImpl<Control>,
                 public IDispatch, public ATL::IPerPropertyBrowsingImpl<Control>,
-                public IConnectionPointContainer, public IConnectionPoint {
+                public IConnectionPointContainer {
 public:
     BEGIN_PROP_MAP(Control)
         PROP_ENTRY_TYPE("Extent", 1, MappedNativePageClass, VT_I4)
@@ -339,8 +339,6 @@ public:
         if (iid == IID_IUnknown || iid == IID_IOleObject) *value = static_cast<IOleObject*>(this);
         else if (state_.wizardEvents && iid == IID_IConnectionPointContainer)
             *value = static_cast<IConnectionPointContainer*>(this);
-        else if (state_.wizardEvents && iid == IID_IConnectionPoint)
-            *value = static_cast<IConnectionPoint*>(this);
         else if (iid == IID_IPersistStreamInit && state_.initInterface) *value = static_cast<IPersistStreamInit*>(this);
         else if (iid == IID_IPersist || iid == IID_IPersistStream) *value = static_cast<IPersistStream*>(this);
         else if (iid == IID_IPersistStorage && state_.storageInterface) {
@@ -361,41 +359,66 @@ public:
     }
     ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
     ULONG STDMETHODCALLTYPE Release() override { const auto n = --refs_; if (!n) delete this; return n; }
+    // IOleObject::Unadvise(DWORD) and IConnectionPoint::Unadvise(DWORD)
+    // have identical signatures but DIFFERENT COM contracts. Keep the
+    // connection point as a separate interface/object, not a second
+    // override on the control that silently changes IOleObject semantics.
+    class EventPoint final : public IConnectionPoint {
+    public:
+        explicit EventPoint(Control* owner) noexcept : owner_(owner) {}
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+            if (!out) return E_POINTER;
+            *out = nullptr;
+            if (iid != IID_IUnknown && iid != IID_IConnectionPoint) return E_NOINTERFACE;
+            *out = static_cast<IConnectionPoint*>(this);
+            AddRef();
+            return S_OK;
+        }
+        ULONG STDMETHODCALLTYPE AddRef() override { return owner_->AddRef(); }
+        ULONG STDMETHODCALLTYPE Release() override { return owner_->Release(); }
+        HRESULT STDMETHODCALLTYPE GetConnectionInterface(IID* iid) override {
+            if (!iid) return E_POINTER;
+            *iid = OriginalWtlPageEventIID;
+            return S_OK;
+        }
+        HRESULT STDMETHODCALLTYPE GetConnectionPointContainer(IConnectionPointContainer** output) override {
+            return owner_->QueryInterface(IID_IConnectionPointContainer,
+                                          reinterpret_cast<void**>(output));
+        }
+        HRESULT STDMETHODCALLTYPE Advise(IUnknown* target, DWORD* cookie) override {
+            if (!target || !cookie) return E_POINTER;
+            *cookie = 0;
+            if (!owner_->state_.wizardEvents) return CONNECT_E_NOCONNECTION;
+            if (owner_->eventSink_.p) return CONNECT_E_ADVISELIMIT;
+            ATL::CComPtr<IDispatch> selected;
+            const HRESULT hr = target->QueryInterface(OriginalWtlPageEventIID,
+                                                      reinterpret_cast<void**>(&selected.p));
+            if (FAILED(hr)) return hr;
+            if (!selected.p) return E_UNEXPECTED;
+            owner_->eventSink_ = std::move(selected);
+            *cookie = 42;
+            ++owner_->state_.eventAdvises;
+            return S_OK;
+        }
+        HRESULT STDMETHODCALLTYPE Unadvise(DWORD cookie) override {
+            if (cookie != 42 || !owner_->eventSink_.p) return CONNECT_E_NOCONNECTION;
+            owner_->eventSink_.Release();
+            ++owner_->state_.eventUnadvises;
+            return S_OK;
+        }
+        HRESULT STDMETHODCALLTYPE EnumConnections(IEnumConnections**) override { return E_NOTIMPL; }
+    private:
+        Control* owner_;
+    };
     HRESULT STDMETHODCALLTYPE EnumConnectionPoints(IEnumConnectionPoints**) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE FindConnectionPoint(REFIID iid, IConnectionPoint** output) override {
         if (!output) return E_POINTER;
         *output = nullptr;
         if (!state_.wizardEvents || iid != OriginalWtlPageEventIID) return CONNECT_E_NOCONNECTION;
-        return QueryInterface(IID_IConnectionPoint, reinterpret_cast<void**>(output));
-    }
-    HRESULT STDMETHODCALLTYPE GetConnectionInterface(IID* output) override {
-        if (!output) return E_POINTER;
-        *output = OriginalWtlPageEventIID;
+        *output = static_cast<IConnectionPoint*>(&eventPoint_);
+        eventPoint_.AddRef();
         return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE GetConnectionPointContainer(IConnectionPointContainer** output) override {
-        return QueryInterface(IID_IConnectionPointContainer, reinterpret_cast<void**>(output));
-    }
-    HRESULT STDMETHODCALLTYPE Advise(IUnknown* target, DWORD* cookie) override {
-        if (!target || !cookie) return E_POINTER;
-        *cookie = 0;
-        if (!state_.wizardEvents) return CONNECT_E_NOCONNECTION;
-        if (eventSink_.p) return CONNECT_E_ADVISELIMIT;
-        ATL::CComPtr<IDispatch> selected;
-        HRESULT hr = target->QueryInterface(OriginalWtlPageEventIID,
-                                            reinterpret_cast<void**>(&selected.p));
-        if (FAILED(hr)) return hr;
-        if (!selected.p) return E_UNEXPECTED;
-        eventSink_ = std::move(selected);
-        *cookie = 42; ++state_.eventAdvises;
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE Unadvise(DWORD cookie) override {
-        if (cookie != 42 || !eventSink_.p) return CONNECT_E_NOCONNECTION;
-        eventSink_.Release(); ++state_.eventUnadvises;
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE EnumConnections(IEnumConnections**) override { return E_NOTIMPL; }
     HRESULT FireWizardEvent(long value) {
         if (!eventSink_.p) return CONNECT_E_NOCONNECTION;
         VARIANTARG argument{}; argument.vt = VT_I4; argument.lVal = value;
@@ -563,6 +586,7 @@ private:
     ULONG refs_ = 1;
     ControlState& state_;
     ATL::CComPtr<IDispatch> eventSink_;
+    EventPoint eventPoint_{this};
     ATL::CComPtr<IOleClientSite> site_;
     ATL::CComPtr<IStorage> storage_;
 };
