@@ -1155,6 +1155,8 @@ class OriginalWtlAxPage : public WTL::CAxPropertyPageImpl<OriginalWtlAxPage> {
 public:
     enum { IDD = 665 };
     int initialized = 0, destroyed = 0, createCalls = 0;
+    int wizardNext = 0;
+    int OnWizardNext() { ++wizardNext; return 0; }
     bool expectedCreateFailure = false;
     HRESULT createResult = E_UNEXPECTED;
     HRESULT CreateActiveXControls(UINT id) override {
@@ -1348,6 +1350,84 @@ bool originalWtlAxPageFailedInit(ControlState& state, ATL::CAtlModule& module,
     REQUIRE(rejected && retired);
     return true;
 }
+// The original WTL property-page notification path must drive the OS wizard
+// buttons, not a handwritten WM_NOTIFY or a second property-sheet engine.
+class OriginalWtlWizardSecondPage : public WTL::CPropertyPageImpl<OriginalWtlWizardSecondPage> {
+public:
+    enum { IDD = 602 };
+    int activations = 0, wizardBack = 0;
+    int OnSetActive() { ++activations; return 0; }
+    int OnWizardBack() { ++wizardBack; return 0; }
+    BEGIN_MSG_MAP(OriginalWtlWizardSecondPage)
+        CHAIN_MSG_MAP(WTL::CPropertyPageImpl<OriginalWtlWizardSecondPage>)
+    END_MSG_MAP()
+};
+// PropertySheet may post the button action. Drive only actual Win32 messages;
+// never call the WTL OnWizard* callbacks directly or use arbitrary sleeps.
+bool NativeWizardSelected(HWND sheet, HWND expected) {
+    for (int i = 0; i != 128; ++i) {
+        const HWND current = reinterpret_cast<HWND>(
+            ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0));
+        if (current && current == expected && ::IsWindow(current)) return true;
+        MSG message{};
+        if (!::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) return false;
+        if (message.message == WM_QUIT) {
+            ::PostQuitMessage(static_cast<int>(message.wParam));
+            return false;
+        }
+        if (!::PropSheet_IsDialogMessage(sheet, &message)) {
+            ::TranslateMessage(&message);
+            ::DispatchMessageW(&message);
+        }
+    }
+    return false;
+}
+bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
+                         REFCLSID registeredId) {
+    state = ControlState{};
+    state.classId = registeredId;
+    state.discoverWindow = true;
+    state.siteFirst = true;
+    state.streamBytes = 8;
+    OriginalWtlAxPage ax;
+    OriginalWtlWizardSecondPage ordinary;
+    WTL::CPropertySheet wizard(L"Original WTL ActiveX wizard");
+    wizard.SetWizardMode();
+    const HPROPSHEETPAGE first = ax.Create(), second = ordinary.Create();
+    REQUIRE(first && wizard.AddPage(first) && second && wizard.AddPage(second));
+    const HWND sheet = wizard.Create(nullptr);
+    REQUIRE(sheet && ::IsWindow(sheet));
+    // Ensure every failing assertion still retires the actual native sheet
+    // before the C++ page owners go out of scope.
+    struct SheetRetirement {
+        HWND hwnd;
+        ~SheetRetirement() { if (::IsWindow(hwnd)) ::DestroyWindow(hwnd); }
+    } retirement{sheet};
+    REQUIRE(::SendMessageW(sheet, PSM_SETCURSEL, 0, 0));
+    REQUIRE(reinterpret_cast<HWND>(
+                ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0)) ==
+                ax.m_hWnd &&
+            ax.initialized == 1 && ax.createCalls == 1 &&
+            ax.createResult == S_OK && state.activated == 1 &&
+            state.loaded == 1 && !state.closed);
+    // A real button action triggers PSN_WIZNEXT on the original ActiveX page.
+    ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_NEXT, 0);
+    REQUIRE(NativeWizardSelected(sheet, ordinary.m_hWnd));
+    REQUIRE(ax.wizardNext == 1 && ordinary.activations >= 1 &&
+            state.activated == 1 && !state.closed &&
+            ax.m_hWnd && ::IsWindow(ax.m_hWnd));
+    // Next page's native PSN_WIZBACK must restore the already-created control.
+    ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_BACK, 0);
+    REQUIRE(NativeWizardSelected(sheet, ax.m_hWnd));
+    REQUIRE(ordinary.wizardBack == 1 && ax.wizardNext == 1 &&
+            ax.createCalls == 1 && ax.initialized == 1 &&
+            state.activated == 1 && state.loaded == 1 && !state.closed);
+    REQUIRE(::DestroyWindow(sheet));
+    REQUIRE(!ax.m_hWnd && !ordinary.m_hWnd &&
+            ax.destroyed == 1 && state.closed == 1 &&
+            state.destroyed == 1 && module.GetLockCount() == 0);
+    return true;
+}
 bool resourceInitialization() {
     ControlState state;
     CLSID classId{};
@@ -1358,6 +1438,7 @@ bool resourceInitialization() {
     ATL::CAtlModule module;
     REQUIRE(originalWtlAxPage(state, module, classId));
     REQUIRE(originalWtlAxPageFailedInit(state, module, classId));
+    REQUIRE(originalWtlAxWizard(state, module, classId));
     for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619), WORD(620), WORD(621), WORD(622), WORD(631), WORD(632), WORD(633), WORD(648)}) for (int mode = 0; mode < 5; ++mode) {
         state = ControlState{}; state.classId = classId; state.discoverWindow = true;
         state.siteFirst = mode != 1; state.initInterface = mode != 2;
