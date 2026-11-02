@@ -1192,6 +1192,12 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID re
     state.classId = registeredId;
     state.discoverWindow = true;
     state.siteFirst = true;
+    // Original WTL owns the entire HGLOBAL stream. ParseInitData consumes
+    // the first DWORD (zero license characters), leaving the cursor at the
+    // persisted DWORD marker, but native IStream::Stat still reports all
+    // eight envelope bytes. Explicit ATL hosting passes a separate four-byte
+    // persistence stream and retains its independent four-byte expectation.
+    state.streamBytes = 8;
     OriginalWtlAxPage page;
     REQUIRE(page.m_psp.dwFlags & PSP_DLGINDIRECT);
     REQUIRE(page.m_psp.pResource != nullptr);
