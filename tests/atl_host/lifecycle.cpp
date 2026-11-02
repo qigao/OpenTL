@@ -1156,7 +1156,8 @@ public:
     enum { IDD = 665 };
     int initialized = 0, destroyed = 0, createCalls = 0;
     int wizardNext = 0;
-    int OnWizardNext() { ++wizardNext; return 0; }
+    bool vetoWizardNext = false;
+    int OnWizardNext() { ++wizardNext; return vetoWizardNext ? -1 : 0; }
     bool expectedCreateFailure = false;
     HRESULT createResult = E_UNEXPECTED;
     HRESULT CreateActiveXControls(UINT id) override {
@@ -1356,8 +1357,9 @@ class OriginalWtlWizardSecondPage : public WTL::CPropertyPageImpl<OriginalWtlWiz
 public:
     enum { IDD = 602 };
     int activations = 0, wizardBack = 0;
+    bool vetoWizardBack = false;
     int OnSetActive() { ++activations; return 0; }
-    int OnWizardBack() { ++wizardBack; return 0; }
+    int OnWizardBack() { ++wizardBack; return vetoWizardBack ? -1 : 0; }
     BEGIN_MSG_MAP(OriginalWtlWizardSecondPage)
         CHAIN_MSG_MAP(WTL::CPropertyPageImpl<OriginalWtlWizardSecondPage>)
     END_MSG_MAP()
@@ -1371,6 +1373,23 @@ bool NativeWizardSelected(HWND sheet, const HWND& expected) {
         if (current && current == expected && ::IsWindow(current)) return true;
         MSG message{};
         if (!::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) return false;
+        if (message.message == WM_QUIT) {
+            ::PostQuitMessage(static_cast<int>(message.wParam));
+            return false;
+        }
+        if (!PropSheet_IsDialogMessage(sheet, &message)) {
+            ::TranslateMessage(&message);
+            ::DispatchMessageW(&message);
+        }
+    }
+    return false;
+}
+// A button may post an action rather than complete it synchronously. Process
+// only the queue's real messages and reject a non-quiescent message source.
+bool NativeWizardDispatchPending(HWND sheet) {
+    for (int i = 0; i != 128; ++i) {
+        MSG message{};
+        if (!::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) return true;
         if (message.message == WM_QUIT) {
             ::PostQuitMessage(static_cast<int>(message.wParam));
             return false;
@@ -1410,16 +1429,33 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
             ax.initialized == 1 && ax.createCalls == 1 &&
             ax.createResult == S_OK && state.activated == 1 &&
             state.loaded == 1 && !state.closed);
-    // A real button action triggers PSN_WIZNEXT on the original ActiveX page.
+    // A real Next press must honor the original WTL page's negative return:
+    // no page switch, no COM reinitialization, no early close.
+    ax.vetoWizardNext = true;
+    ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_NEXT, 0);
+    REQUIRE(NativeWizardDispatchPending(sheet));
+    REQUIRE(reinterpret_cast<HWND>(
+                ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0)) ==
+                ax.m_hWnd && ax.wizardNext == 1 &&
+            ax.createCalls == 1 && state.activated == 1 && !state.closed);
+    ax.vetoWizardNext = false;
     ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_NEXT, 0);
     REQUIRE(NativeWizardSelected(sheet, ordinary.m_hWnd));
-    REQUIRE(ax.wizardNext == 1 && ordinary.activations >= 1 &&
+    REQUIRE(ax.wizardNext == 2 && ordinary.activations >= 1 &&
             state.activated == 1 && !state.closed &&
             ax.m_hWnd && ::IsWindow(ax.m_hWnd));
-    // Next page's native PSN_WIZBACK must restore the already-created control.
+    // Back veto must also be respected by the native sheet.
+    ordinary.vetoWizardBack = true;
+    ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_BACK, 0);
+    REQUIRE(NativeWizardDispatchPending(sheet));
+    REQUIRE(reinterpret_cast<HWND>(
+                ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0)) ==
+                ordinary.m_hWnd && ordinary.wizardBack == 1 &&
+            state.activated == 1 && !state.closed);
+    ordinary.vetoWizardBack = false;
     ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_BACK, 0);
     REQUIRE(NativeWizardSelected(sheet, ax.m_hWnd));
-    REQUIRE(ordinary.wizardBack == 1 && ax.wizardNext == 1 &&
+    REQUIRE(ordinary.wizardBack == 2 && ax.wizardNext == 2 &&
             ax.createCalls == 1 && ax.initialized == 1 &&
             state.activated == 1 && state.loaded == 1 && !state.closed);
     REQUIRE(::DestroyWindow(sheet));
