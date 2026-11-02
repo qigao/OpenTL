@@ -640,8 +640,12 @@ The real registered DLL reports an error from its own string resource through
 its existing GetValue method; the client retains that native IErrorInfo through
 server-object release, unregistration and actual DLL unload. Existing ordinary
 and cached tear-off IOuter TypeLib cases execute a failing real Invoke and check
-its native EXCEPINFO. These checks qualify this error-reporting subset, not all
-Automation exceptions or complete original Microsoft application compatibility.
+its native EXCEPINFO. The registered IOuter route also resolves its parameter
+name and invokes it by that DISPID, performs native BSTR-to-I2 conversion, and
+reports the failing argument index for an unconvertible value. These checks
+qualify this error-reporting and single-argument dispatch subset, not optional
+parameters, all locale conversions, all Automation exceptions or complete
+original Microsoft application compatibility.
 
 
 ## Original COMMap class-source subset

@@ -268,9 +268,13 @@ bool OriginalRegisteredDispatch(IOuter* outer) {
     ORIGINAL_CLASS_CHECK(aggregate->GetTypeInfo(0, LOCALE_SYSTEM_DEFAULT, &missing.p) == TYPE_E_LIBNOTREGISTERED && !missing.p);
     ORIGINAL_CLASS_CHECK(registration.Add(1) == S_OK);
     ORIGINAL_CLASS_CHECK(OriginalRegisteredInfo(aggregate.p, IID_IAgg, LIBID_AGGREGLib, &aggregateInfo.p));
-    LPOLESTR method = const_cast<LPOLESTR>(L"GetName");
-    DISPID member = DISPID_UNKNOWN;
-    ORIGINAL_CLASS_CHECK(outer->GetIDsOfNames(IID_NULL, &method, 1, LOCALE_SYSTEM_DEFAULT, &member) == S_OK && member != DISPID_UNKNOWN);
+    LPOLESTR dispatchNames[] = {const_cast<LPOLESTR>(L"GetName"),
+        const_cast<LPOLESTR>(L"n")};
+    DISPID dispatchIds[] = {DISPID_UNKNOWN, DISPID_UNKNOWN};
+    ORIGINAL_CLASS_CHECK(outer->GetIDsOfNames(IID_NULL, dispatchNames, 2,
+        LOCALE_SYSTEM_DEFAULT, dispatchIds) == S_OK &&
+        dispatchIds[0] != DISPID_UNKNOWN && dispatchIds[1] != DISPID_UNKNOWN);
+    const DISPID member = dispatchIds[0];
     const wchar_t* names[] = {L"IOuter", L"ITearOff1", L"ITearOff2", L"IChain", L"IAgg", L"IAutoAgg", L"IAggBlind", L"IAutoAggB"};
     for (short n = 0; n < 8; ++n) {
         VARIANTARG number{}; number.vt = VT_I2; number.iVal = n;
@@ -279,6 +283,38 @@ bool OriginalRegisteredDispatch(IOuter* outer) {
         ORIGINAL_CLASS_CHECK(outer->Invoke(member, IID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
             &parameters, &result, nullptr, nullptr) == S_OK && result.vt == VT_BSTR && NameIs(result.bstrVal, names[n]));
     }
+    ATL::CComVariant namedNumber(static_cast<short>(3));
+    DISPPARAMS namedParameters{&namedNumber, &dispatchIds[1], 1, 1};
+    ATL::CComVariant namedResult;
+    ORIGINAL_CLASS_CHECK(outer->Invoke(member, IID_NULL, LOCALE_SYSTEM_DEFAULT,
+        DISPATCH_METHOD, &namedParameters, &namedResult, nullptr, nullptr) == S_OK &&
+        namedResult.vt == VT_BSTR && NameIs(namedResult.bstrVal, L"IChain"));
+    ATL::CComVariant convertedNumber(L"4");
+    DISPPARAMS convertedParameters{&convertedNumber, nullptr, 1, 0};
+    ATL::CComVariant convertedResult;
+    ORIGINAL_CLASS_CHECK(outer->Invoke(member, IID_NULL, LOCALE_SYSTEM_DEFAULT,
+        DISPATCH_METHOD, &convertedParameters, &convertedResult, nullptr, nullptr) == S_OK &&
+        convertedResult.vt == VT_BSTR && NameIs(convertedResult.bstrVal, L"IAgg"));
+    ATL::CComVariant wrongNumber(L"not-a-number");
+    DISPPARAMS wrongParameters{&wrongNumber, nullptr, 1, 0};
+    UINT wrongArgument = 99;
+    ORIGINAL_CLASS_CHECK(outer->Invoke(member, IID_NULL, LOCALE_SYSTEM_DEFAULT,
+        DISPATCH_METHOD, &wrongParameters, nullptr, nullptr, &wrongArgument) ==
+        DISP_E_TYPEMISMATCH && wrongArgument == 0);
+    ATL::CComVariant exceptionNumber(static_cast<short>(8));
+    DISPPARAMS exceptionParameters{&exceptionNumber, nullptr, 1, 0};
+    ATL::CComVariant exceptionResult;
+    EXCEPINFO dispatchException{};
+    ORIGINAL_CLASS_CHECK(outer->Invoke(member, IID_NULL, LOCALE_SYSTEM_DEFAULT,
+        DISPATCH_METHOD, &exceptionParameters, &exceptionResult,
+        &dispatchException, nullptr) == DISP_E_EXCEPTION);
+    ATL::CComBSTR dispatchExceptionText, dispatchExceptionSource,
+        dispatchExceptionHelp;
+    dispatchExceptionText.Attach(dispatchException.bstrDescription);
+    dispatchExceptionSource.Attach(dispatchException.bstrSource);
+    dispatchExceptionHelp.Attach(dispatchException.bstrHelpFile);
+    ORIGINAL_CLASS_CHECK(NameIs(dispatchExceptionText,
+        L"Interface type out of range"));
     ATL::CComPtr<IChain> chain;
     ATL::CComPtr<IAggBlind> blind;
     ATL::CComPtr<IAutoAgg> automatic;
