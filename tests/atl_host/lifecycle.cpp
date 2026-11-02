@@ -338,6 +338,8 @@ struct PropertyState {
 };
 inline constexpr IID OriginalWtlPageEventIID = {0xb348ee50, 0xbe2a, 0x420a,
     {0xb7,0xa8,0x03,0x93,0x9a,0x86,0x64,0x5c}};
+inline constexpr ULONG OriginalWtlPersistedStreamBytes =
+    sizeof(DWORD) + 20 * sizeof(WCHAR) + sizeof(DWORD);
 class Control;
 struct ControlState {
     CLSID classId{};
@@ -346,6 +348,7 @@ struct ControlState {
     int eventAdvises = 0, eventUnadvises = 0;
     bool siteFirst = true, initInterface = true, failInit = false, destroyDuringInit = false;
     bool siteOrder = true, licenseSeen = false;
+    int licenseAttempts = 0;
     bool storageInterface = true, storageReadOnly = true, rejectLicense = false, destroyDuringStorageQuery = false;
     bool discoverWindow = false, destroyDialogDuringInit = false, sendInitDuringLoad = false;
     bool destroyWizardDuringLoad = false;
@@ -708,6 +711,7 @@ public:
     }
     HRESULT STDMETHODCALLTYPE CreateInstanceLic(IUnknown* outer, IUnknown*, REFIID iid, BSTR key, void** value) override {
         if (!value) return E_POINTER; *value = nullptr;
+        ++state_.licenseAttempts;
         if (state_.rejectLicense || !key || ::SysStringLen(key) != 20 || std::memcmp(key, L"OpenATL-test-license", 20 * sizeof(WCHAR))) return CLASS_E_NOTLICENSED;
         state_.licenseSeen = true; return CreateInstance(outer, iid, value);
     }
@@ -1521,12 +1525,11 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID re
     state.classId = registeredId;
     state.discoverWindow = true;
     state.siteFirst = true;
-    // Original WTL owns the entire HGLOBAL stream. ParseInitData consumes
-    // the first DWORD (zero license characters), leaving the cursor at the
-    // persisted DWORD marker, but native IStream::Stat still reports all
-    // eight envelope bytes. Explicit ATL hosting passes a separate four-byte
-    // persistence stream and retains its independent four-byte expectation.
-    state.streamBytes = 8;
+    // Original WTL owns the entire HGLOBAL stream. ParseInitData consumes the
+    // counted license key, leaving the cursor at the persisted DWORD marker,
+    // while native IStream::Stat still reports the complete envelope. Explicit
+    // ATL hosting keeps its independent four-byte persistence-stream contract.
+    state.streamBytes = OriginalWtlPersistedStreamBytes;
     OriginalWtlAxPage page;
     REQUIRE(page.m_psp.dwFlags & PSP_DLGINDIRECT);
     REQUIRE(page.m_psp.pResource != nullptr);
@@ -1573,7 +1576,8 @@ bool originalWtlAxPage(ControlState& state, ATL::CAtlModule& module, REFCLSID re
     ATL::CAxWindow control(controlWindow);
     ATL::CComPtr<IOleObject> object;
     REQUIRE(control.QueryControl(IID_IOleObject, reinterpret_cast<void**>(&object)) == S_OK);
-    REQUIRE(state.activated == 1 && state.loaded == 1 && state.siteOrder);
+    REQUIRE(state.licenseAttempts == 1 && state.licenseSeen && state.activated == 1 &&
+            state.loaded == 1 && state.siteOrder);
     // Original WTL's OnInitDialog must execute ordinary DLGINIT only once,
     // alongside the independently persisted ActiveX IStream record.
     const HWND list = ::GetDlgItem(page.m_hWnd, 715);
@@ -1635,6 +1639,45 @@ bool originalWtlRejectedPageCreation() {
             page.pageCallbackReleases == 1 && !page.m_hWnd && !page.createCalls);
     return true;
 }
+// A licensed original-WTL page must propagate the factory's native rejection
+// before constructing, loading or activating a control. The failed host child
+// and property sheet remain ordinary native owners and must still retire cleanly.
+bool originalWtlAxPageRejectedLicense(ControlState& state, ATL::CAtlModule& module,
+                                      REFCLSID registeredId) {
+    state = ControlState{};
+    state.classId = registeredId;
+    state.discoverWindow = true;
+    state.siteFirst = true;
+    state.rejectLicense = true;
+    state.streamBytes = OriginalWtlPersistedStreamBytes;
+    OriginalWtlAxPage page;
+    page.expectedCreateFailure = true;
+    WTL::CPropertySheet sheet(L"WTL ActiveX rejected license");
+    const HPROPSHEETPAGE handle = page.Create();
+    REQUIRE(handle && sheet.AddPage(handle));
+    const HWND window = sheet.Create(nullptr);
+    NativeSheetGuard owner{window};
+    REQUIRE(window && ::IsWindow(window));
+    REQUIRE(::SendMessageW(window, PSM_SETCURSEL, 0, 0));
+    const HWND current = reinterpret_cast<HWND>(
+        ::SendMessageW(window, PSM_GETCURRENTPAGEHWND, 0, 0));
+    const HWND child = ::GetDlgItem(page.m_hWnd, 711);
+    ATL::CAxWindow hosted(child);
+    ATL::CComPtr<IOleObject> object;
+    const HRESULT query = child ? hosted.QueryControl(IID_IOleObject,
+        reinterpret_cast<void**>(&object.p)) : E_FAIL;
+    REQUIRE(current && current == page.m_hWnd &&
+            page.createCalls == 1 && page.createResult == CLASS_E_NOTLICENSED &&
+            page.initialized == 0 && state.licenseAttempts == 1 &&
+            !state.licenseSeen && !object.p && FAILED(query) &&
+            state.loaded == 0 && state.initialized == 0 && state.activated == 0 &&
+            state.closed == 0 && state.detached == 0 && state.destroyed == 0);
+    REQUIRE(::DestroyWindow(window));
+    REQUIRE(!page.m_hWnd && page.destroyed == 1 &&
+            state.closed == 0 && state.detached == 0 && state.destroyed == 0 &&
+            module.GetLockCount() == 0);
+    return true;
+}
 // A failing native IPersistStreamInit::Load must not reach application
 // WM_INITDIALOG or leave a live COM object/module lock behind. Use the same
 // registered factory and original WTL code path as the successful page.
@@ -1645,7 +1688,7 @@ bool originalWtlAxPageFailedInit(ControlState& state, ATL::CAtlModule& module,
     state.discoverWindow = true;
     state.siteFirst = true;
     state.failInit = true;
-    state.streamBytes = 8;
+    state.streamBytes = OriginalWtlPersistedStreamBytes;
     OriginalWtlAxPage page;
     page.expectedCreateFailure = true;
     WTL::CPropertySheet sheet(L"WTL ActiveX failed initialization");
@@ -1673,7 +1716,8 @@ bool originalWtlAxPageFailedInit(ControlState& state, ATL::CAtlModule& module,
     // the control's failed Load. Require rejection/Close immediately, but
     // require final COM destruction and module unlock only after Windows
     // has destroyed the property sheet and its native child windows.
-    const bool failedLoadClosed = state.loaded == 1 &&
+    const bool failedLoadClosed = state.licenseAttempts == 1 && state.licenseSeen &&
+        state.loaded == 1 &&
         state.activated == 0 && state.closed == 1;
     const bool rejected = nativeBound && nativeFailure &&
                           noControl && queryRejected && failedLoadClosed;
@@ -1760,7 +1804,7 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
     state.wizardEvents = true;
     state.discoverWindow = true;
     state.siteFirst = true;
-    state.streamBytes = 8;
+    state.streamBytes = OriginalWtlPersistedStreamBytes;
     OriginalWtlAxPage ax;
     OriginalWtlWizardSecondPage ordinary;
     WTL::CPropertySheet wizard(L"Original WTL ActiveX wizard");
@@ -1775,7 +1819,8 @@ bool originalWtlAxWizard(ControlState& state, ATL::CAtlModule& module,
                 ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0)) ==
                 ax.m_hWnd &&
             ax.initialized == 1 && ax.createCalls == 1 &&
-            ax.createResult == S_OK && state.activated == 1 &&
+            ax.createResult == S_OK && state.licenseAttempts == 1 &&
+            state.licenseSeen && state.activated == 1 &&
             state.loaded == 1 && !state.closed);
     REQUIRE(state.activeEventControl && state.eventAdvises == 1 &&
             state.activeEventControl->FireWizardEvent(41) == S_OK &&
@@ -1857,7 +1902,7 @@ bool originalWtlWizardControlKeyboard(ControlState& state, ATL::CAtlModule& modu
     state.classId = registeredId;
     state.discoverWindow = true;
     state.siteFirst = true;
-    state.streamBytes = 8;
+    state.streamBytes = OriginalWtlPersistedStreamBytes;
     state.wizardEvents = true;
     UIObjectState keyboard;
     struct ForwardProbe {
@@ -1965,7 +2010,8 @@ bool originalWtlWizardControlKeyboard(ControlState& state, ATL::CAtlModule& modu
     };
     keyboard.acceleratorResult = S_OK;
     REQUIRE(postKey(control, VK_F7));
-    REQUIRE(keyboard.acceleratorCalls == 1 && keyboard.acceleratorWindow == control &&
+    REQUIRE(state.licenseAttempts == 1 && state.licenseSeen &&
+            keyboard.acceleratorCalls == 1 && keyboard.acceleratorWindow == control &&
             keyboard.acceleratorKey == VK_F7 && !keyboard.destroyed &&
             forward.calls == 1 && forward.result == TRUE);
     keyboard.acceleratorResult = S_FALSE;
@@ -2067,7 +2113,7 @@ bool originalWtlWizardCancelDuringLoad(ControlState& state,
     state.classId = registeredId;
     state.siteFirst = true;
     state.discoverWindow = true;
-    state.streamBytes = 8;
+    state.streamBytes = OriginalWtlPersistedStreamBytes;
     state.destroyWizardDuringLoad = true;
     WCHAR trace[2]{};
     state.traceWizardTeardown =
@@ -2108,7 +2154,8 @@ bool originalWtlWizardCancelDuringLoad(ControlState& state,
         page.pageCallbackCreates == 1 && page.pageCallbackAddRefs == 1 &&
         page.pageCallbackReleases == 1 &&
         page.initialized == 0 && page.destroyed == 1 &&
-        !page.m_hWnd && state.loaded == 1 &&
+        !page.m_hWnd && state.licenseAttempts == 1 && state.licenseSeen &&
+        state.loaded == 1 &&
         state.activated == 0 && state.closed == 1 &&
         state.detached == 1 && state.destroyed == 1 &&
         module.GetLockCount() == 0;
@@ -2139,7 +2186,7 @@ bool originalWtlWizardUserCancel(ControlState& state, ATL::CAtlModule& module,
     state.classId = registeredId;
     state.discoverWindow = true;
     state.siteFirst = true;
-    state.streamBytes = 8;
+    state.streamBytes = OriginalWtlPersistedStreamBytes;
     OriginalWtlAxPage page;
     WTL::CPropertySheet wizard(L"Original WTL native Cancel");
     wizard.SetWizardMode();
@@ -2152,7 +2199,8 @@ bool originalWtlWizardUserCancel(ControlState& state, ATL::CAtlModule& module,
     REQUIRE(reinterpret_cast<HWND>(
                 ::SendMessageW(sheet, PSM_GETCURRENTPAGEHWND, 0, 0)) ==
                 page.m_hWnd && page.initialized == 1 &&
-            page.createCalls == 1 && state.activated == 1 &&
+            page.createCalls == 1 && state.licenseAttempts == 1 &&
+            state.licenseSeen && state.activated == 1 &&
             state.loaded == 1 && !state.closed);
     page.vetoCancel = true;
     ::SendMessageW(sheet, PSM_PRESSBUTTON, PSBTN_CANCEL, 0);
@@ -2186,6 +2234,7 @@ bool resourceInitialization() {
     ATL::CAtlModule module;
     REQUIRE(originalWtlRejectedPageCreation());
     REQUIRE(originalWtlAxPage(state, module, classId));
+    REQUIRE(originalWtlAxPageRejectedLicense(state, module, classId));
     REQUIRE(originalWtlAxPageFailedInit(state, module, classId));
     REQUIRE(originalWtlAxWizard(state, module, classId));
     REQUIRE(originalWtlWizardControlKeyboard(state, module, classId));
