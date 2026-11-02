@@ -334,6 +334,27 @@ void TraceWizardReentry(ControlState& state, const char* phase, HWND other = nul
         state.closed, state.detached, state.destroyed);
     std::fflush(stderr);
 }
+// Diagnostic only: inspect every enumerated process heap at exact native
+// teardown checkpoints. A passing HeapValidate is not proof that a later
+// invalid free or use-after-free cannot occur; no production behavior changes.
+void TraceWizardHeaps(ControlState& state, const char* phase) noexcept {
+    if (!state.destroyWizardDuringLoad) return;
+    HANDLE heaps[64]{};
+    const DWORD total = ::GetProcessHeaps(64, heaps);
+    DWORD inspected = 0, invalid = 0;
+    if (total != 0 && total <= 64) {
+        for (DWORD i = 0; i < total; ++i) {
+            ++inspected;
+            if (!::HeapValidate(heaps[i], 0, nullptr)) ++invalid;
+        }
+    }
+    std::fprintf(stderr,
+        "WTL_HEAP_CHECK phase=%s total=%lu inspected=%lu invalid=%lu complete=%d\\n",
+        phase, static_cast<unsigned long>(total),
+        static_cast<unsigned long>(inspected), static_cast<unsigned long>(invalid),
+        total != 0 && total <= 64);
+    std::fflush(stderr);
+}
 class Control : public IOleObject, public IPersistStreamInit, public IPersistStream, public IPersistStorage,
                 public IRunnableObject, public ATL::ISpecifyPropertyPagesImpl<Control>,
                 public IDispatch, public ATL::IPerPropertyBrowsingImpl<Control>,
@@ -604,9 +625,11 @@ private:
             const HWND sheet = state_.window ?
                 ::GetAncestor(state_.window, GA_ROOT) : nullptr;
             TraceWizardReentry(state_, "DestroyWindow.enter", sheet);
+            TraceWizardHeaps(state_, "DestroyWindow.enter");
             state_.wizardCancelSucceeded = sheet &&
                 ::DestroyWindow(sheet) != FALSE;
             TraceWizardReentry(state_, "DestroyWindow.return", sheet);
+            TraceWizardHeaps(state_, "DestroyWindow.return");
         }
         if (state_.sendInitDuringLoad) ::SendMessageW(::GetParent(state_.window), WM_INITDIALOG, 0, 0);
         return state_.failInit || !state_.siteOrder || (state_.failInitializationAt &&
@@ -1316,6 +1339,7 @@ public:
                 "WTL.DLGPROC.WM_INITDIALOG.enter" : message == WM_DESTROY ?
                 "WTL.DLGPROC.WM_DESTROY.enter" : "WTL.DLGPROC.WM_NCDESTROY.enter", self->m_hWnd);
         const INT_PTR result = WTL::CAxPropertyPageImpl<OriginalWtlAxPage>::DialogProc(object, message, w, l);
+        if (message == WM_INITDIALOG) TraceWizardHeaps(*self->traceState, "WTL.DLGPROC.WM_INITDIALOG.return");
         if (message == WM_INITDIALOG || message == WM_DESTROY || message == WM_NCDESTROY)
             TraceWizardReentry(*self->traceState, message == WM_INITDIALOG ?
                 "WTL.DLGPROC.WM_INITDIALOG.return" : message == WM_DESTROY ?
@@ -1334,7 +1358,10 @@ public:
     }
     void OnPageRelease() {
         ++pageCallbackReleases;
-        if (traceState) TraceWizardReentry(*traceState, "WTL.PropPageCallback.release");
+        if (traceState) {
+            TraceWizardReentry(*traceState, "WTL.PropPageCallback.release");
+            TraceWizardHeaps(*traceState, "WTL.PropPageCallback.release");
+        }
     }
     void OnFinalMessage(HWND window) override {
         if (traceState) TraceWizardReentry(*traceState, "ATL.OnFinalMessage", window);
@@ -1344,7 +1371,10 @@ public:
         if (traceState) TraceWizardReentry(*traceState, "WTL.CreateActiveXControls.enter", m_hWnd);
         ++createCalls;
         createResult = WTL::CAxPropertyPageImpl<OriginalWtlAxPage>::CreateActiveXControls(id);
-        if (traceState) TraceWizardReentry(*traceState, "WTL.CreateActiveXControls.return", m_hWnd);
+        if (traceState) {
+            TraceWizardReentry(*traceState, "WTL.CreateActiveXControls.return", m_hWnd);
+            TraceWizardHeaps(*traceState, "WTL.CreateActiveXControls.return");
+        }
         if (FAILED(createResult) && !expectedCreateFailure) {
             const DWORD error = ::GetLastError();
             const HWND child = ::GetDlgItem(m_hWnd, 711);
@@ -1705,6 +1735,7 @@ bool originalWtlWizardCancelDuringLoad(ControlState& state,
     const HPROPSHEETPAGE handle = page.Create();
     REQUIRE(handle && wizard.AddPage(handle));
     TraceWizardReentry(state, "PropertySheet.Create.enter");
+    TraceWizardHeaps(state, "PropertySheet.Create.enter");
     const HWND created = wizard.Create(nullptr);
     TraceWizardReentry(state, "PropertySheet.Create.return", created);
     if (state.destroyWizardDuringLoad) {
