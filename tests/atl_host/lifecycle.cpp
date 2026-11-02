@@ -30,6 +30,7 @@ struct UIObjectState {
     HRESULT acceleratorResult = S_FALSE, clearResult = E_UNEXPECTED;
     IOleInPlaceFrame* clearActiveFrom = nullptr; // borrowed through the callback
     bool insideAccelerator = false, destroyedInsideAccelerator = false;
+    bool acceleratorShift = false;
 };
 class UIObject : public IDispatch, public IDropTarget, public IDataObject,
                  public IOleCommandTarget, public IOleInPlaceActiveObject {
@@ -91,6 +92,7 @@ public:
         ++state->acceleratorCalls;
         state->acceleratorWindow = message->hwnd;
         state->acceleratorKey = message->wParam;
+        state->acceleratorShift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
         state->insideAccelerator = true;
         const HRESULT result = state->acceleratorResult;
         if (state->clearActiveFrom)
@@ -1916,7 +1918,28 @@ bool originalWtlWizardControlKeyboard(ControlState& state, ATL::CAtlModule& modu
     active.Release(); // The native host now owns the active object's reference.
     REQUIRE(keyboard.refs == 1 && !keyboard.destroyed);
 
-    auto postKey = [&](HWND source, WPARAM key) {
+    auto postKey = [&](HWND source, WPARAM key, bool shift = false) {
+        struct KeyboardState {
+            BYTE saved[256]{};
+            bool valid = ::GetKeyboardState(saved) != FALSE;
+            bool changed = false;
+            bool Apply(bool shift) {
+                if (!valid) return false;
+                BYTE selected[256];
+                std::memcpy(selected, saved, sizeof(selected));
+                for (int key : {VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_CONTROL,
+                                VK_LCONTROL, VK_RCONTROL, VK_MENU, VK_LMENU, VK_RMENU})
+                    selected[key] = 0;
+                selected[VK_SHIFT] = selected[VK_LSHIFT] = shift ? 0x80 : 0;
+                if (!::SetKeyboardState(selected)) return false;
+                changed = true;
+                return true;
+            }
+            ~KeyboardState() {
+                if (changed && !::SetKeyboardState(saved)) std::terminate();
+            }
+        } modifiers;
+        if (!modifiers.valid) return false;
         ::SetFocus(source);
         if (::GetFocus() != source || !::PostMessageW(source, WM_KEYDOWN, key, 1)) return false;
         bool observed = false;
@@ -1928,6 +1951,9 @@ bool originalWtlWizardControlKeyboard(ControlState& state, ATL::CAtlModule& modu
                 return false;
             }
             const bool requested = message.hwnd == source && message.message == WM_KEYDOWN && message.wParam == key;
+            // PeekMessage can update the thread's key table. Apply modifiers
+            // at dispatch, then restore them on every return from this scope.
+            if (requested && !modifiers.Apply(shift)) return false;
             const bool handled = PropSheet_IsDialogMessage(sheet, &message) != FALSE;
             if (requested) {
                 if (observed) return false;
@@ -1960,13 +1986,64 @@ bool originalWtlWizardControlKeyboard(ControlState& state, ATL::CAtlModule& modu
             page.initialized == 1 && state.loaded == 1 && state.activated == 1 &&
             forward.calls == 3 && forward.result == TRUE);
 
+    // A wizard application owns its per-page button policy. Restore the
+    // first-page policy after Back before testing its native tab boundary.
+    wizard.SetWizardButtons(PSWIZB_NEXT);
+    REQUIRE(NativeWizardDispatchPending(sheet));
+    const HWND list = ::GetDlgItem(page.m_hWnd, 715);
+    const HWND combo = ::GetDlgItem(page.m_hWnd, 716);
+    const HWND next = ::GetDlgItem(sheet, ID_WIZNEXT);
+    const HWND back = ::GetDlgItem(sheet, ID_WIZBACK);
+    REQUIRE(list && combo && next && back && ::IsWindowVisible(next) &&
+            ::IsWindowEnabled(next) && !::IsWindowEnabled(back));
+    auto tabTo = [&](HWND source, bool shift, HWND expected) {
+        const bool posted = postKey(source, VK_TAB, shift);
+        const HWND actual = ::GetFocus();
+        if (!posted || actual != expected) {
+            std::fprintf(stderr,
+                "WTL_TAB_FOCUS posted=%d source=%d shift=%d expected=%d actual=%d\n",
+                posted, ::GetDlgCtrlID(source), shift, ::GetDlgCtrlID(expected), ::GetDlgCtrlID(actual));
+            return false;
+        }
+        return true;
+    };
+    const SHORT initialShift = ::GetKeyState(VK_SHIFT);
+    const int nextBeforeTab = page.wizardNext, backBeforeTab = ordinary.wizardBack;
+    // Consumed Tab/Shift+Tab must leave focus inside the ActiveX host.
+    REQUIRE(tabTo(control, false, control));
+    REQUIRE(keyboard.acceleratorCalls == 4 && keyboard.acceleratorKey == VK_TAB &&
+            !keyboard.acceleratorShift && forward.calls == 4 && forward.result == TRUE);
+    REQUIRE(tabTo(control, true, control));
+    REQUIRE(keyboard.acceleratorCalls == 5 && keyboard.acceleratorShift &&
+            forward.calls == 5 && forward.result == TRUE &&
+            ::GetKeyState(VK_SHIFT) == initialShift);
+    // Once the active object declines Tab, Windows owns the actual focus
+    // sequence across the original page and into the native wizard buttons.
+    keyboard.acceleratorResult = S_FALSE;
+    REQUIRE(tabTo(control, false, list));
+    REQUIRE(keyboard.acceleratorCalls == 6 && !keyboard.acceleratorShift &&
+            forward.calls == 6 && forward.result == FALSE);
+    REQUIRE(tabTo(list, false, combo));
+    REQUIRE(tabTo(combo, false, next));
+    REQUIRE(tabTo(next, true, combo));
+    REQUIRE(tabTo(combo, true, list));
+    REQUIRE(tabTo(list, true, control));
+    REQUIRE(keyboard.acceleratorCalls == 6 && forward.calls == 6 &&
+            page.wizardNext == nextBeforeTab && ordinary.wizardBack == backBeforeTab &&
+            page.createCalls == 1 && state.loaded == 1 && state.activated == 1 &&
+            ::GetKeyState(VK_SHIFT) == initialShift && NativeWizardSelected(sheet, page.m_hWnd));
+
+    keyboard.acceleratorResult = S_OK;
     keyboard.clearActiveFrom = frame;
     REQUIRE(postKey(control, VK_F9));
-    REQUIRE(keyboard.acceleratorCalls == 4 && keyboard.clearResult == S_OK &&
+    REQUIRE(keyboard.acceleratorCalls == 7 && keyboard.clearResult == S_OK &&
             keyboard.destroyed == 1 && keyboard.refs == 0 &&
-            !keyboard.destroyedInsideAccelerator && forward.calls == 4 && forward.result == TRUE);
+            !keyboard.destroyedInsideAccelerator && forward.calls == 7 && forward.result == TRUE);
     REQUIRE(postKey(control, VK_F7));
-    REQUIRE(keyboard.acceleratorCalls == 4 && forward.calls == 5 && forward.result == FALSE &&
+    REQUIRE(keyboard.acceleratorCalls == 7 && forward.calls == 8 && forward.result == FALSE &&
+            !keyboard.destroyedInsideAccelerator);
+    REQUIRE(tabTo(control, false, list) && tabTo(list, true, control));
+    REQUIRE(keyboard.acceleratorCalls == 7 && forward.calls == 9 && forward.result == FALSE &&
             state.eventAdvises == 1 &&
             !state.eventUnadvises && state.activeEventControl &&
             state.activeEventControl->FireWizardEvent(47) == S_OK &&

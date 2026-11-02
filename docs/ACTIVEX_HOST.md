@@ -154,6 +154,18 @@ control initialization. An active object that calls `SetActiveObject(NULL)`
 inside its accelerator callback remains alive until that callback returns;
 later keys no longer reach it. The registered control's independent typed
 event connection continues to work and unadvises once at native teardown.
+
+The same case checks real Tab and Shift+Tab focus movement. When the active
+object consumes either key, focus stays in its host. When it declines Tab,
+Windows moves focus from the host to the page's ListBox and ComboBox, then
+to the native Next button; Shift+Tab traverses the reverse sequence. The
+fixture supplies explicit tab-stop styles and the first page's native
+`PSWIZB_NEXT` button policy. Focus traversal must not press wizard buttons or
+initialize the control again, and it continues after active-object removal.
+Posted keys use a saved/restored UI-thread modifier table through
+[SetKeyboardState](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setkeyboardstate);
+the accelerator callback observes the actual Shift state during dispatch.
+
 This test-local WTL admission does not enable global implicit hosting or
 claim coverage of arbitrary application keymaps.
 
