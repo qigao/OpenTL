@@ -13,6 +13,11 @@ The project targets ATL/WTL source compatibility. The implemented ATL API
 is a tested subset; see the [compatibility matrix](docs/ATL_COMPATIBILITY.md)
 for supported behavior and remaining work.
 
+Version 0.2.0 adds bounded BSTR/VARIANT streams, COM property-page authoring,
+original WTL ActiveX page/wizard qualification, and broader native Automation
+argument coverage. It also includes the standalone COM header, CSize::SetSize
+and CWindow::GetWindowText(CString&) fixes used by Weasel.
+
 ## Use in an application
 
 Check out [qigao/OpenWTL](https://github.com/qigao/OpenWTL) into your project
