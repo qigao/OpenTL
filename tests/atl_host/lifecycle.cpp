@@ -1159,6 +1159,16 @@ public:
     HRESULT CreateActiveXControls(UINT id) override {
         ++createCalls;
         createResult = WTL::CAxPropertyPageImpl<OriginalWtlAxPage>::CreateActiveXControls(id);
+        if (FAILED(createResult)) {
+            const DWORD error = ::GetLastError();
+            const HWND child = ::GetDlgItem(m_hWnd, 711);
+            WCHAR windowClass[32]{};
+            if (child) ::GetClassNameW(child, windowClass, 32);
+            std::fprintf(stderr,
+                "WTL_AX_CONTROL_FAIL hr=%08lx os_error=%lu child=%p child_class=%ls\n",
+                static_cast<unsigned long>(createResult), error,
+                static_cast<void*>(child), windowClass);
+        }
         return createResult;
     }
     LRESULT OnInit(UINT, WPARAM, LPARAM, BOOL& handled) {
