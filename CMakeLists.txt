@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(OpenWTL VERSION 0.1.0 LANGUAGES CXX)
+project(OpenWTL VERSION 0.1.2 LANGUAGES CXX)
 
 # Only Windows-targeting compilers: llvm-mingw on Windows/Linux/macOS,
 # or MSVC cl.exe on Windows. OpenWTL::WTL is the public GUI target.
