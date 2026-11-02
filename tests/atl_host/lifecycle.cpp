@@ -1310,25 +1310,31 @@ bool originalWtlAxPageFailedInit(ControlState& state, ATL::CAtlModule& module,
         reinterpret_cast<void**>(&object.p)) : E_FAIL;
     const HWND pageBeforeDestroy = page.m_hWnd;
     const bool nativeBound = current && current == pageBeforeDestroy;
-    const bool rejected = nativeBound &&
-        page.createCalls == 1 && page.createResult == E_FAIL &&
-        page.initialized == 0 && !object &&
-        FAILED(query) && state.loaded == 1 && !state.activated &&
-        state.closed == 1 && state.destroyed == 1 &&
-        module.GetLockCount() == 0;
+    const bool noControl = object.p == nullptr;
+    const bool queryRejected = FAILED(query);
+    const bool nativeFailure = page.createCalls == 1 &&
+        page.createResult == E_FAIL && page.initialized == 0;
+    const bool controlRetired = state.loaded == 1 &&
+        state.activated == 0 && state.closed == 1 &&
+        state.destroyed == 1 && module.GetLockCount() == 0;
+    const bool rejected = nativeBound && nativeFailure &&
+                          noControl && queryRejected && controlRetired;
     const BOOL destroyed = ::DestroyWindow(window);
     const bool retired = destroyed && page.destroyed == 1 &&
                          !page.m_hWnd && module.GetLockCount() == 0;
     if (!rejected || !retired) {
         std::fprintf(stderr,
             "WTL_AX_FAILED_INIT_TRACE rejected=%d retired=%d destroyed=%d"
-            " native_page=%p page_before=%p page_after=%p bound=%d child=%p query=%08lx"
+            " native_page=%p page_before=%p page_after=%p bound=%d"
+            " native_fail=%d no_control=%d query_rejected=%d control_retired=%d"
+            " child=%p control=%p query=%08lx"
             " create_calls=%d create_hr=%08lx init=%d destroy_callback=%d"
             " loaded=%d activated=%d closed=%d control_destroyed=%d"
             " module_lock=%ld last_error=%lu\n",
             rejected, retired, destroyed, static_cast<void*>(current),
             static_cast<void*>(pageBeforeDestroy), static_cast<void*>(page.m_hWnd),
-            nativeBound, static_cast<void*>(child),
+            nativeBound, nativeFailure, noControl, queryRejected, controlRetired,
+            static_cast<void*>(child), static_cast<void*>(object.p),
             static_cast<unsigned long>(query), page.createCalls,
             static_cast<unsigned long>(page.createResult), page.initialized,
             page.destroyed, state.loaded, state.activated, state.closed,
