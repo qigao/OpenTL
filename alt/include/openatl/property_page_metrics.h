@@ -46,19 +46,14 @@ inline DWORD ReadPropertyPageTemplateMetrics(const void* data, SIZE_T size,
         if (!parsed.pointSize) return ERROR_INVALID_DATA;
         if (parsed.extended && (!reader.Read(parsed.weight) || !reader.Read(parsed.italic) ||
             !reader.Read(parsed.charset))) return ERROR_INVALID_DATA;
-        // DLGTEMPLATEEX documentation describes normal weight normalization.
-        // Other weight behavior awaits independent native qualification.
-        if (parsed.weight != FW_NORMAL && parsed.weight != FW_DONTCARE) return ERROR_NOT_SUPPORTED;
+        // DLGTEMPLATEEX accepts the documented LOGFONT weight range, then
+        // normalizes every admitted value to FW_NORMAL.
+        if (parsed.weight > 1000) return ERROR_NOT_SUPPORTED;
         if (!reader.Array(font,false)) return ERROR_INVALID_DATA;
         const SIZE_T bytes = font.end - font.begin;
         if (bytes <= sizeof(WCHAR)) return ERROR_INVALID_DATA;
         if (bytes > sizeof(parsed.face)) return ERROR_NOT_SUPPORTED;
         std::memcpy(parsed.face,reader.bytes + font.begin,bytes);
-        // DS_SHELLFONT combines SETFONT and FIXEDSYS. Admit its documented
-        // MS Shell Dlg mapping; other face/style combinations remain explicit.
-        if ((parsed.style & DS_FIXEDSYS) &&
-            ::CompareStringOrdinal(parsed.face,-1,L"MS Shell Dlg",-1,TRUE)!=CSTR_EQUAL)
-            return ERROR_NOT_SUPPORTED;
     }
     parsed.headerBytes = reader.position;
     output = parsed;
@@ -87,6 +82,8 @@ inline HRESULT PropertyPageDialogSize(const void* data, SIZE_T size, SIZE& outpu
             const int height = dpi > 0 ? ::MulDiv(metrics.pointSize,dpi,72) : 0;
             if (height <= 0) { ::ReleaseDC(nullptr,dc); return E_INVALIDARG; }
             description.lfHeight = -height;
+            // Windows ignores the template's declared weight for dialog font
+            // creation and uses FW_NORMAL.
             description.lfWeight = FW_NORMAL;
             description.lfItalic = metrics.italic;
             description.lfCharSet = metrics.charset;

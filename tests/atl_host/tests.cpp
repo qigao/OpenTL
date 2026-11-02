@@ -852,9 +852,14 @@ bool propertyPageMetrics() {
             if (parsed.hasFont) {
                 const SIZE_T faceBytes=(std::wcslen(parsed.face)+1)*sizeof(WCHAR);
                 const SIZE_T faceOffset=parsed.headerBytes-faceBytes;
-                const WCHAR notShell=L'X';
-                std::memcpy(bad.data()+faceOffset,&notShell,sizeof(notShell));
-                CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
+                const WCHAR shellAlias[]=L"MS Shell Dlg 2";
+                const auto aliasFirst=reinterpret_cast<const BYTE*>(shellAlias);
+                std::vector<BYTE> alias;
+                alias.reserve(bad.size()-faceBytes+sizeof(shellAlias));
+                alias.insert(alias.end(),bad.begin(),bad.begin()+faceOffset);
+                alias.insert(alias.end(),aliasFirst,aliasFirst+sizeof(shellAlias));
+                alias.insert(alias.end(),bad.begin()+faceOffset+faceBytes,bad.end());
+                CHECK(PropertyPageDialogSize(alias.data(),alias.size(),output)==S_OK && compareNative(alias));
             }
         }
         if (parsed.hasFont) {
@@ -870,8 +875,11 @@ bool propertyPageMetrics() {
             bad=snapshot; std::memcpy(bad.data()+faceOffset,&zero,sizeof(zero));
             CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
             if (parsed.extended) {
-                bad=snapshot; const WORD unqualifiedWeight=FW_BOLD;
-                std::memcpy(bad.data()+pointOffset+sizeof(WORD),&unqualifiedWeight,sizeof(unqualifiedWeight));
+                bad=snapshot; const WORD normalizedWeight=FW_BOLD;
+                std::memcpy(bad.data()+pointOffset+sizeof(WORD),&normalizedWeight,sizeof(normalizedWeight));
+                CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==S_OK && compareNative(bad));
+                bad=snapshot; const WORD invalidWeight=1001;
+                std::memcpy(bad.data()+pointOffset+sizeof(WORD),&invalidWeight,sizeof(invalidWeight));
                 CHECK(PropertyPageDialogSize(bad.data(),bad.size(),output)==HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
             }
         }
